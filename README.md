@@ -1,6 +1,6 @@
 # Cloudflare 云抓取 (astrbot_plugin_cloudflare_browser_run)
 
-`astrbot_plugin_cloudflare_browser_run` 是一个 AstrBot LLM Tool 插件，用于通过 Cloudflare Browser Rendering / Browser Run 抓取网页内容。
+通过 Cloudflare Browser Rendering / Browser Run 抓取网页内容。
 
 ## 功能
 
@@ -38,12 +38,14 @@
 
 API Token 创建方式：
 
-1. 打开 [Cloudflare API Tokens 页面](https://dash.cloudflare.com/profile/api-tokens)。
+1. 打开 [Cloudflare API Tokens 页面](https://dash.cloudflare.com/?to=/:account/api-tokens)。
 2. 选择创建自定义 Token。可参考 [Cloudflare 创建 API Token 文档](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)。
 3. 添加 Account 权限：`Browser Rendering` -> `Edit`。
 4. Account Resources 选择需要使用 Browser Run 的账号。
 
 只需要 `Edit` 权限；`Read` 权限不足以执行抓取、启动 Crawl 或取消 Crawl。
+<img width="720" height="520" alt="image" src="https://github.com/user-attachments/assets/c3547ca1-d23b-4ce1-8034-779ee8075196" />
+
 
 Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://dash.cloudflare.com/?to=/:account/workers/browser-run) 查看。
 
