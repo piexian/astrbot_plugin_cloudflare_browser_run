@@ -1,6 +1,6 @@
 # Cloudflare 云抓取 (astrbot_plugin_cloudflare_browser_run)
 
-`astrbot_plugin_cloudflare_browser_run` 是一个 AstrBot LLM Tool 插件，用于通过 Cloudflare Browser Rendering / Browser Run 抓取网页内容。
+通过 Cloudflare Browser Rendering / Browser Run 抓取网页内容。
 
 ## 功能
 
