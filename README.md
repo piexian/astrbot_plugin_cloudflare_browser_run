@@ -44,6 +44,8 @@ API Token 创建方式：
 4. Account Resources 选择需要使用 Browser Run 的账号。
 
 只需要 `Edit` 权限；`Read` 权限不足以执行抓取、启动 Crawl 或取消 Crawl。
+<img width="720" height="520" alt="image" src="https://github.com/user-attachments/assets/c3547ca1-d23b-4ce1-8034-779ee8075196" />
+
 
 Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://dash.cloudflare.com/?to=/:account/workers/browser-run) 查看。
 
