@@ -38,14 +38,6 @@ CONFIG_PATHS = {
     "default_render": ("request_settings", "default_render"),
     "max_crawl_limit": ("request_settings", "max_crawl_limit"),
     "max_output_chars": ("output_settings", "max_output_chars"),
-    "enable_markdown": ("tool_settings", "enable_markdown"),
-    "enable_content": ("tool_settings", "enable_content"),
-    "enable_links": ("tool_settings", "enable_links"),
-    "enable_scrape": ("tool_settings", "enable_scrape"),
-    "enable_json": ("tool_settings", "enable_json"),
-    "enable_crawl_start": ("tool_settings", "enable_crawl_start"),
-    "enable_crawl_status": ("tool_settings", "enable_crawl_status"),
-    "enable_crawl_cancel": ("tool_settings", "enable_crawl_cancel"),
 }
 
 CONFIG_DEFAULTS = {
@@ -56,14 +48,6 @@ CONFIG_DEFAULTS = {
     "default_render": False,
     "max_crawl_limit": 100,
     "max_output_chars": 12000,
-    "enable_markdown": True,
-    "enable_content": True,
-    "enable_links": True,
-    "enable_scrape": True,
-    "enable_json": True,
-    "enable_crawl_start": True,
-    "enable_crawl_status": True,
-    "enable_crawl_cancel": True,
 }
 
 RESOURCE_TYPES = [
@@ -1059,26 +1043,25 @@ class CloudflareCrawlCancelTool(_CloudflareTool):
         return _tool_payload(payload, runtime.max_output_chars)
 
 
-TOOL_CLASSES = {
-    "enable_markdown": CloudflareMarkdownTool,
-    "enable_content": CloudflareContentTool,
-    "enable_links": CloudflareLinksTool,
-    "enable_scrape": CloudflareScrapeTool,
-    "enable_json": CloudflareJsonTool,
-    "enable_crawl_start": CloudflareCrawlStartTool,
-    "enable_crawl_status": CloudflareCrawlStatusTool,
-    "enable_crawl_cancel": CloudflareCrawlCancelTool,
-}
+TOOL_CLASSES = (
+    CloudflareMarkdownTool,
+    CloudflareContentTool,
+    CloudflareLinksTool,
+    CloudflareScrapeTool,
+    CloudflareJsonTool,
+    CloudflareCrawlStartTool,
+    CloudflareCrawlStatusTool,
+    CloudflareCrawlCancelTool,
+)
 
 
 def build_tools(config: dict[str, Any]) -> tuple[list[FunctionTool], list[str]]:
-    """按插件配置创建需要注册的 LLM Tool。"""
+    """创建本插件的全部 LLM Tool。"""
     runtime = CloudflareBrowserRuntime(config)
     tools: list[FunctionTool] = []
     names: list[str] = []
-    for config_key, tool_cls in TOOL_CLASSES.items():
-        if _to_bool(_cfg(config, config_key), True):
-            tool = tool_cls(runtime=runtime)
-            tools.append(tool)
-            names.append(tool.name)
+    for tool_cls in TOOL_CLASSES:
+        tool = tool_cls(runtime=runtime)
+        tools.append(tool)
+        names.append(tool.name)
     return tools, names

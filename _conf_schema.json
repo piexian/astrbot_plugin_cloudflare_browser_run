@@ -82,61 +82,6 @@
       }
     }
   },
-  "tool_settings": {
-    "type": "object",
-    "description": "工具开关",
-    "hint": "控制初始化时注册哪些 LLM Tool",
-    "items": {
-      "enable_markdown": {
-        "type": "bool",
-        "description": "启用 Markdown 抓取工具",
-        "hint": "注册 cf_browser_markdown",
-        "default": true
-      },
-      "enable_content": {
-        "type": "bool",
-        "description": "启用 HTML 内容工具",
-        "hint": "注册 cf_browser_content",
-        "default": true
-      },
-      "enable_links": {
-        "type": "bool",
-        "description": "启用链接提取工具",
-        "hint": "注册 cf_browser_links",
-        "default": true
-      },
-      "enable_scrape": {
-        "type": "bool",
-        "description": "启用元素抓取工具",
-        "hint": "注册 cf_browser_scrape",
-        "default": true
-      },
-      "enable_json": {
-        "type": "bool",
-        "description": "启用 JSON 抽取工具",
-        "hint": "注册 cf_browser_json，可能使用 Workers AI",
-        "default": true
-      },
-      "enable_crawl_start": {
-        "type": "bool",
-        "description": "启用 Crawl 启动工具",
-        "hint": "注册 cf_browser_crawl_start",
-        "default": true
-      },
-      "enable_crawl_status": {
-        "type": "bool",
-        "description": "启用 Crawl 查询工具",
-        "hint": "注册 cf_browser_crawl_status",
-        "default": true
-      },
-      "enable_crawl_cancel": {
-        "type": "bool",
-        "description": "启用 Crawl 取消工具",
-        "hint": "注册 cf_browser_crawl_cancel",
-        "default": true
-      }
-    }
-  },
   "account_id": {
     "type": "string",
     "default": "",

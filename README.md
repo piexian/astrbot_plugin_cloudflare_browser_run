@@ -64,20 +64,7 @@ Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://d
 |--------|--------|------|
 | `max_output_chars` | `12000` | 工具返回给 LLM 的最大字符数 |
 
-### 工具开关
-
-| 配置项 | 默认值 | 工具 |
-|--------|--------|------|
-| `enable_markdown` | `true` | `cf_browser_markdown` |
-| `enable_content` | `true` | `cf_browser_content` |
-| `enable_links` | `true` | `cf_browser_links` |
-| `enable_scrape` | `true` | `cf_browser_scrape` |
-| `enable_json` | `true` | `cf_browser_json` |
-| `enable_crawl_start` | `true` | `cf_browser_crawl_start` |
-| `enable_crawl_status` | `true` | `cf_browser_crawl_status` |
-| `enable_crawl_cancel` | `true` | `cf_browser_crawl_cancel` |
-
-修改工具开关后需要重载插件。
+工具启停使用 AstrBot 自带的 LLM Tool 管理功能控制。插件初始化时会注册全部工具。
 
 ## 工具
 
