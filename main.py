@@ -1,24 +1,51 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.star import Context, Star, register
+"""AstrBot 插件入口：Cloudflare 云抓取。"""
+
+from __future__ import annotations
+
 from astrbot.api import logger
+from astrbot.api.star import Context, Star
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
-    def __init__(self, context: Context):
+from .tools.cloudflare_browser import PLUGIN_NAME, TOOL_NAMES, build_tools
+
+
+class CloudflareBrowserRunPlugin(Star):
+    """负责将 Cloudflare 抓取工具注册到 AstrBot。"""
+
+    def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
+        self.config = config or {}
+        self._registered_tool_names: list[str] = []
+        self._register_tools()
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+    def _register_tools(self) -> None:
+        """根据配置注册启用的 LLM Tool。"""
+        self._remove_tools()
+        tools, names = build_tools(self.config)
+        self._registered_tool_names = names
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+        if tools:
+            self.context.add_llm_tools(*tools)
+            logger.info(
+                f"[{PLUGIN_NAME}] registered LLM tools: "
+                f"{', '.join(self._registered_tool_names)}"
+            )
+        else:
+            logger.info(f"[{PLUGIN_NAME}] all LLM tools are disabled by configuration")
 
-    async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+    def _remove_tools(self) -> None:
+        """卸载本插件注册过的工具，避免重载后重复。"""
+        try:
+            tool_mgr = self.context.get_llm_tool_manager()
+        except Exception:
+            return
+        for name in TOOL_NAMES:
+            try:
+                tool_mgr.remove_func(name)
+            except Exception:
+                try:
+                    tool_mgr.remove_tool(name)
+                except Exception:
+                    pass
+
+    async def terminate(self) -> None:
+        self._remove_tools()

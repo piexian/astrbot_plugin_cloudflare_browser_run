@@ -1,0 +1,175 @@
+{
+  "connection_settings": {
+    "type": "object",
+    "description": "连接设置",
+    "hint": "Cloudflare API 账号和令牌",
+    "items": {
+      "account_id": {
+        "type": "string",
+        "description": "Cloudflare Account ID",
+        "hint": "Cloudflare 账号 ID，必填",
+        "default": ""
+      },
+      "api_token": {
+        "type": "string",
+        "description": "Cloudflare API Token",
+        "hint": "需要 Browser Rendering / Browser Run 相关权限，必填",
+        "default": ""
+      }
+    }
+  },
+  "request_settings": {
+    "type": "object",
+    "description": "请求设置",
+    "hint": "控制 Cloudflare 请求和 crawl 默认行为",
+    "items": {
+      "timeout_seconds": {
+        "type": "int",
+        "description": "请求超时时间（秒）",
+        "hint": "每次 Cloudflare API 请求的最大等待时间",
+        "default": 120,
+        "slider": {
+          "min": 5,
+          "max": 300,
+          "step": 5
+        }
+      },
+      "default_cache_ttl": {
+        "type": "int",
+        "description": "默认 cacheTTL（秒）",
+        "hint": "Cloudflare Browser Rendering 的 cacheTTL 查询参数，0 表示禁用缓存",
+        "default": 5,
+        "slider": {
+          "min": 0,
+          "max": 86400,
+          "step": 1
+        }
+      },
+      "default_render": {
+        "type": "bool",
+        "description": "Crawl 默认启用浏览器渲染",
+        "hint": "关闭时 crawl 默认 render=false，更省费用；需要 JS 渲染页面时可由工具参数显式开启",
+        "default": false
+      },
+      "max_crawl_limit": {
+        "type": "int",
+        "description": "最大 Crawl 页数",
+        "hint": "限制 LLM 单次 cf_browser_crawl_start 可提交的 limit",
+        "default": 100,
+        "slider": {
+          "min": 1,
+          "max": 1000,
+          "step": 1
+        }
+      }
+    }
+  },
+  "output_settings": {
+    "type": "object",
+    "description": "输出设置",
+    "hint": "控制工具返回给 LLM 的内容长度",
+    "items": {
+      "max_output_chars": {
+        "type": "int",
+        "description": "最大输出字符数",
+        "hint": "超过该长度会截断并标记 truncated=true，避免工具结果塞爆上下文",
+        "default": 12000,
+        "slider": {
+          "min": 1000,
+          "max": 50000,
+          "step": 1000
+        }
+      }
+    }
+  },
+  "tool_settings": {
+    "type": "object",
+    "description": "工具开关",
+    "hint": "控制初始化时注册哪些 LLM Tool",
+    "items": {
+      "enable_markdown": {
+        "type": "bool",
+        "description": "启用 Markdown 抓取工具",
+        "hint": "注册 cf_browser_markdown",
+        "default": true
+      },
+      "enable_content": {
+        "type": "bool",
+        "description": "启用 HTML 内容工具",
+        "hint": "注册 cf_browser_content",
+        "default": true
+      },
+      "enable_links": {
+        "type": "bool",
+        "description": "启用链接提取工具",
+        "hint": "注册 cf_browser_links",
+        "default": true
+      },
+      "enable_scrape": {
+        "type": "bool",
+        "description": "启用元素抓取工具",
+        "hint": "注册 cf_browser_scrape",
+        "default": true
+      },
+      "enable_json": {
+        "type": "bool",
+        "description": "启用 JSON 抽取工具",
+        "hint": "注册 cf_browser_json，可能使用 Workers AI",
+        "default": true
+      },
+      "enable_crawl_start": {
+        "type": "bool",
+        "description": "启用 Crawl 启动工具",
+        "hint": "注册 cf_browser_crawl_start",
+        "default": true
+      },
+      "enable_crawl_status": {
+        "type": "bool",
+        "description": "启用 Crawl 查询工具",
+        "hint": "注册 cf_browser_crawl_status",
+        "default": true
+      },
+      "enable_crawl_cancel": {
+        "type": "bool",
+        "description": "启用 Crawl 取消工具",
+        "hint": "注册 cf_browser_crawl_cancel",
+        "default": true
+      }
+    }
+  },
+  "account_id": {
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "api_token": {
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "timeout_seconds": {
+    "type": "int",
+    "default": 120,
+    "invisible": true
+  },
+  "default_cache_ttl": {
+    "type": "int",
+    "default": 5,
+    "invisible": true
+  },
+  "default_render": {
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "max_crawl_limit": {
+    "type": "int",
+    "default": 100,
+    "invisible": true
+  },
+  "max_output_chars": {
+    "type": "int",
+    "default": 12000,
+    "invisible": true
+  }
+}
