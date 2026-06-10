@@ -199,19 +199,12 @@ astrbot_plugin_cloudflare_browser_run/
 └── README.md
 ```
 
-## 支持
+## 相关链接
 
 - [AstrBot 插件开发文档](https://docs.astrbot.app/dev/star/plugin-new.html)
 - [Cloudflare Browser Run 文档](https://developers.cloudflare.com/browser-run/)
 - [Cloudflare Browser Rendering 产品页](https://www.cloudflare.com/products/browser-rendering/)
 - [Cloudflare API Token 文档](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)
-- [Issues](https://github.com/piexian/astrbot_plugin_cloudflare_browser_run/issues)
-
-## 相关链接
-
-- [AstrBot](https://docs.astrbot.app/)
-- [Cloudflare Dashboard API Tokens](https://dash.cloudflare.com/profile/api-tokens)
-- [Cloudflare Dashboard Browser Run](https://dash.cloudflare.com/?to=/:account/workers/browser-run)
 
 ## 许可
 
