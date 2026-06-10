@@ -38,7 +38,7 @@
 
 API Token 创建方式：
 
-1. 打开 [Cloudflare API Tokens 页面](https://dash.cloudflare.com/profile/api-tokens)。
+1. 打开 [Cloudflare API Tokens 页面](https://dash.cloudflare.com/?to=/:account/api-tokens)。
 2. 选择创建自定义 Token。可参考 [Cloudflare 创建 API Token 文档](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)。
 3. 添加 Account 权限：`Browser Rendering` -> `Edit`。
 4. Account Resources 选择需要使用 Browser Run 的账号。
