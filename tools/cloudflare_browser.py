@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import field
 from typing import Any
 
@@ -625,6 +626,15 @@ def _page_body(
 
 
 def _validate_body_enums(body: dict[str, Any]) -> str | None:
+    if _is_present(body.get("allow_request_pattern")) and _is_present(
+        body.get("reject_request_pattern")
+    ):
+        return "错误：allow_request_pattern 和 reject_request_pattern 不能同时设置。"
+    if _is_present(body.get("allow_resource_types")) and _is_present(
+        body.get("reject_resource_types")
+    ):
+        return "错误：allow_resource_types 和 reject_resource_types 不能同时设置。"
+
     for field_name in ("allow_resource_types", "reject_resource_types"):
         values = [str(value) for value in _list_from_value(body.get(field_name))]
         error = _validate_values(values, RESOURCE_TYPES, field_name)
@@ -823,7 +833,11 @@ class CloudflareCrawlStartTool(_CloudflareTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
-                **_common_properties(),
+                **{
+                    key: value
+                    for key, value in _common_properties().items()
+                    if key not in {"html", "user_agent"}
+                },
                 "url": {"type": "string", "description": "Starting URL for the crawl."},
                 "limit": {"type": "integer", "minimum": 1},
                 "depth": {"type": "integer", "minimum": 1, "maximum": 100000},
@@ -834,7 +848,7 @@ class CloudflareCrawlStartTool(_CloudflareTool):
                 "render": {"type": "boolean"},
                 "source": {"type": "string", "enum": LINK_SOURCES},
                 "max_age": {"type": "integer", "minimum": 0, "maximum": 604800},
-                "modified_since": {"type": "integer", "minimum": 0},
+                "modified_since": {"type": "integer", "minimum": 1},
                 "crawl_purposes": {
                     "type": "array",
                     "items": {"type": "string", "enum": CRAWL_PURPOSES},
@@ -956,6 +970,12 @@ def _validate_crawl_body(body: dict[str, Any]) -> str | None:
 
     if _is_present(body.get("source")) and str(body["source"]) not in LINK_SOURCES:
         return f"错误：source 必须是以下值之一：{', '.join(LINK_SOURCES)}"
+    if _is_present(body.get("modified_since")):
+        value = _to_int(body.get("modified_since"), 0)
+        now = int(time.time())
+        one_year_ago = now - 365 * 24 * 60 * 60
+        if value <= 0 or value < one_year_ago or value > now:
+            return "错误：modified_since 必须是最近一年内、且不晚于当前时间的 Unix 秒级时间戳。"
     return None
 
 

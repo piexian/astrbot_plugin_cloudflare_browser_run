@@ -136,7 +136,7 @@ Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://d
 
 ## 可选抓取参数
 
-常用可选参数：
+单页抓取工具常用可选参数：
 
 - `cache_ttl`
 - `goto_options`
@@ -155,6 +155,43 @@ Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://d
 - `add_script_tag`
 - `add_style_tag`
 
+Crawl 工具常用可选参数：
+
+- `cache_ttl`
+- `limit`
+- `depth`
+- `formats`
+- `render`
+- `source`
+- `max_age`
+- `modified_since`
+- `crawl_purposes`
+- `options`
+- `json_options`
+- `goto_options`（仅 `render=true` 时使用）
+- `wait_for_selector`（仅 `render=true` 时使用）
+- `wait_for_timeout`（仅 `render=true` 时使用）
+- `viewport`（仅 `render=true` 时使用）
+- `action_timeout`（仅 `render=true` 时使用）
+- `best_attempt`（仅 `render=true` 时使用）
+- `set_javascript_enabled`（仅 `render=true` 时使用）
+- `emulate_media_type`（仅 `render=true` 时使用）
+- `allow_resource_types`（仅 `render=true` 时使用）
+- `reject_resource_types`（仅 `render=true` 时使用）
+- `allow_request_pattern`（仅 `render=true` 时使用）
+- `reject_request_pattern`（仅 `render=true` 时使用）
+- `set_extra_http_headers`（仅 `render=true` 时使用）
+- `authenticate`（仅 `render=true` 时使用）
+- `cookies`（仅 `render=true` 时使用）
+- `add_script_tag`（仅 `render=true` 时使用）
+- `add_style_tag`（仅 `render=true` 时使用）
+
+注意：
+
+- `allow_request_pattern` 和 `reject_request_pattern` 不能同时使用。
+- `allow_resource_types` 和 `reject_resource_types` 不能同时使用。
+- `modified_since` 只用于 Crawl，必须是最近一年内且不晚于当前时间的 Unix 秒级时间戳。
+
 ## 敏感信息
 
 `api_token`、`set_extra_http_headers`、`authenticate`、`cookies` 等字段会在错误信息中脱敏。请只在可信环境中配置和调用包含认证信息的抓取任务。
@@ -172,6 +209,20 @@ astrbot_plugin_cloudflare_browser_run/
 ├── _conf_schema.json
 └── README.md
 ```
+
+## 支持
+
+- [AstrBot 插件开发文档](https://docs.astrbot.app/dev/star/plugin-new.html)
+- [Cloudflare Browser Run 文档](https://developers.cloudflare.com/browser-run/)
+- [Cloudflare Browser Rendering 产品页](https://www.cloudflare.com/products/browser-rendering/)
+- [Cloudflare API Token 文档](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)
+- [Issues](https://github.com/piexian/astrbot_plugin_cloudflare_browser_run/issues)
+
+## 相关链接
+
+- [AstrBot](https://docs.astrbot.app/)
+- [Cloudflare Dashboard API Tokens](https://dash.cloudflare.com/profile/api-tokens)
+- [Cloudflare Dashboard Browser Run](https://dash.cloudflare.com/?to=/:account/workers/browser-run)
 
 ## 许可
 
