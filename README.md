@@ -34,7 +34,14 @@
 | 配置项 | 必填 | 说明 |
 |--------|------|------|
 | `account_id` | 是 | Cloudflare Account ID |
-| `api_token` | 是 | Cloudflare API Token |
+| `api_token` | 是 | Cloudflare API Token，需要 `Browser Rendering - Edit` 权限 |
+
+API Token 创建方式：
+
+1. 进入 Cloudflare Dashboard 的 API Tokens 页面。
+2. 选择创建自定义 Token。
+3. 添加 Account 权限：`Browser Rendering` -> `Edit`。
+4. Account Resources 选择需要使用 Browser Run 的账号。
 
 ### 请求设置
 

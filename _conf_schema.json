@@ -13,7 +13,7 @@
       "api_token": {
         "type": "string",
         "description": "Cloudflare API Token",
-        "hint": "需要 Browser Rendering / Browser Run 相关权限，必填",
+        "hint": "需要 Account 权限：Browser Rendering - Edit，必填",
         "default": ""
       }
     }
