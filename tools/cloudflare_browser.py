@@ -441,7 +441,7 @@ def _page_parameters(
     schema: dict[str, Any] = {
         "type": "object",
         "properties": properties,
-        "anyOf": [{"required": ["url"]}, {"required": ["html"]}],
+        "description": "Provide either url or html. The tool validates this at runtime.",
     }
     if required:
         schema["required"] = required
