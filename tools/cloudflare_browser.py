@@ -857,7 +857,17 @@ class CloudflareCrawlStartTool(_CloudflareTool):
                     "properties": {
                         "prompt": {"type": "string"},
                         "response_format": {"type": "object"},
-                        "custom_ai": {"type": "array"},
+                        "custom_ai": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "model": {"type": "string"},
+                                    "authorization": {"type": "string"},
+                                },
+                                "required": ["model"],
+                            },
+                        },
                     },
                 },
             },
