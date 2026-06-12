@@ -62,7 +62,15 @@ Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://d
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `max_output_chars` | `12000` | 工具返回给 LLM 的最大字符数 |
+| `max_output_chars` | `12000` | 工具直接返回给 LLM 的最大字符数；超出后完整结果会写入插件持久化目录 |
+
+当抓取结果超过 `max_output_chars` 时，工具不会把完整内容塞回 LLM 上下文，而是返回一个小型 JSON，包含：
+
+- `saved_to_file: true`
+- `file_path`: 完整结果文件路径，位于 `data/plugin_data/astrbot_plugin_cloudflare_browser_run/cloudflare_browser_results/`
+- `file_size_bytes` / `file_size`: 文件大小
+- `content_chars`: 原始 JSON 字符数
+- `suggested_tools`: 建议使用 `astrbot_grep_tool` 搜索文件，或使用 `astrbot_file_read_tool` 分段读取
 
 工具启停使用 AstrBot 自带的 LLM Tool 管理功能控制。插件初始化时会注册全部工具。
 

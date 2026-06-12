@@ -6,11 +6,23 @@ import json
 import re
 import time
 from dataclasses import field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import aiohttp
 from pydantic import Field
 from pydantic.dataclasses import dataclass
+
+try:
+    from astrbot.api.star import StarTools
+except Exception:  # pragma: no cover - compatibility with older AstrBot builds
+    StarTools = None
+try:
+    from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+except Exception:  # pragma: no cover - compatibility with older AstrBot builds
+    get_astrbot_plugin_data_path = None
 
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
@@ -18,6 +30,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 PLUGIN_NAME = "astrbot_plugin_cloudflare_browser_run"
 API_BASE = "https://api.cloudflare.com/client/v4"
+RESULTS_DIR_NAME = "cloudflare_browser_results"
 
 TOOL_NAMES = (
     "cf_browser_markdown",
@@ -266,17 +279,116 @@ def _json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def _tool_payload(payload: dict[str, Any], max_chars: int) -> str:
+def _local_plugin_data_fallback() -> Path:
+    module_path = Path(__file__).resolve()
+    for parent in module_path.parents:
+        if parent.name == "plugins" and parent.parent.name == "data":
+            return parent.parent / "plugin_data" / PLUGIN_NAME
+    return module_path.parents[1] / "data" / "plugin_data" / PLUGIN_NAME
+
+
+def get_plugin_data_dir() -> Path:
+    """获取插件持久化目录，优先使用 AstrBot 标准目录。"""
+    if StarTools is not None:
+        try:
+            data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        except Exception:
+            pass
+        else:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return data_dir.resolve(strict=False)
+
+    if get_astrbot_plugin_data_path is not None:
+        try:
+            data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
+        except Exception:
+            pass
+        else:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return data_dir.resolve(strict=False)
+
+    data_dir = _local_plugin_data_fallback()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir.resolve(strict=False)
+
+
+def _result_file_stem(payload: dict[str, Any]) -> str:
+    result_type = str(payload.get("type") or "result")
+    safe_type = re.sub(r"[^A-Za-z0-9_.-]+", "-", result_type).strip("-._")
+    if not safe_type:
+        safe_type = "result"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return f"{safe_type}_{timestamp}_{uuid4().hex[:8]}"
+
+
+def _format_bytes(size: int) -> str:
+    units = ("B", "KB", "MB", "GB")
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+def _write_large_payload(payload: dict[str, Any], data_dir: Path) -> tuple[Path, int]:
+    results_dir = data_dir / RESULTS_DIR_NAME
+    results_dir.mkdir(parents=True, exist_ok=True)
+    path = results_dir / f"{_result_file_stem(payload)}.json"
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, default=str, indent=2),
+        encoding="utf-8",
+    )
+    return path.resolve(strict=False), path.stat().st_size
+
+
+def _tool_payload(payload: dict[str, Any], max_chars: int, data_dir: Path) -> str:
     max_chars = max(1000, int(max_chars or CONFIG_DEFAULTS["max_output_chars"]))
     dumped = _json_dumps(payload)
     if len(dumped) <= max_chars:
         return dumped
-    preview_limit = max(200, max_chars - 180)
+
+    try:
+        file_path, file_size_bytes = _write_large_payload(payload, data_dir)
+    except Exception as exc:
+        preview_limit = max(200, max_chars - 260)
+        compact = {
+            "saved_to_file": False,
+            "type": payload.get("type"),
+            "url": payload.get("url"),
+            "content_chars": len(dumped),
+            "max_output_chars": max_chars,
+            "error": f"结果超过最大直接返回长度，但写入本地文件失败：{exc}",
+            "preview": dumped[:preview_limit],
+        }
+        return _json_dumps(compact)
+
     compact = {
-        "truncated": True,
+        "saved_to_file": True,
         "type": payload.get("type"),
         "url": payload.get("url"),
-        "preview": dumped[:preview_limit],
+        "file_path": str(file_path),
+        "file_size_bytes": file_size_bytes,
+        "file_size": _format_bytes(file_size_bytes),
+        "content_chars": len(dumped),
+        "max_output_chars": max_chars,
+        "message": (
+            "结果超过最大直接返回长度，已保存到插件持久化目录。"
+            "请使用 astrbot_grep_tool 在 file_path 中搜索关键词，"
+            "或使用 astrbot_file_read_tool 按行分段读取。"
+        ),
+        "suggested_tools": [
+            {
+                "name": "astrbot_grep_tool",
+                "args": {"path": str(file_path), "pattern": "要搜索的关键词"},
+            },
+            {
+                "name": "astrbot_file_read_tool",
+                "args": {"path": str(file_path), "offset": 0, "limit": 120},
+            },
+        ],
     }
     return _json_dumps(compact)
 
@@ -449,8 +561,10 @@ def _page_parameters(
 
 
 class CloudflareBrowserRuntime:
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any], data_dir: Path | str) -> None:
         self.config = config
+        self.data_dir = Path(data_dir).expanduser().resolve(strict=False)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def cfg(self, key: str) -> Any:
         return _cfg(self.config, key)
@@ -662,6 +776,7 @@ async def _call_page_endpoint(
             "result": result,
         },
         runtime.max_output_chars,
+        runtime.data_dir,
     )
 
 
@@ -943,6 +1058,7 @@ class CloudflareCrawlStartTool(_CloudflareTool):
         return _tool_payload(
             {"type": "crawl_start", "job_id": job_id, "message": "Crawl 任务已启动。"},
             runtime.max_output_chars,
+            runtime.data_dir,
         )
 
 
@@ -1020,7 +1136,7 @@ class CloudflareCrawlStatusTool(_CloudflareTool):
             "type": "crawl_status",
             **(result if isinstance(result, dict) else {"result": result}),
         }
-        return _tool_payload(payload, runtime.max_output_chars)
+        return _tool_payload(payload, runtime.max_output_chars, runtime.data_dir)
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -1050,7 +1166,7 @@ class CloudflareCrawlCancelTool(_CloudflareTool):
             "type": "crawl_cancel",
             **(result if isinstance(result, dict) else {"result": result}),
         }
-        return _tool_payload(payload, runtime.max_output_chars)
+        return _tool_payload(payload, runtime.max_output_chars, runtime.data_dir)
 
 
 TOOL_CLASSES = (
@@ -1067,7 +1183,7 @@ TOOL_CLASSES = (
 
 def build_tools(config: dict[str, Any]) -> tuple[list[FunctionTool], list[str]]:
     """创建本插件的全部 LLM Tool。"""
-    runtime = CloudflareBrowserRuntime(config)
+    runtime = CloudflareBrowserRuntime(config, get_plugin_data_dir())
     tools: list[FunctionTool] = []
     names: list[str] = []
     for tool_cls in TOOL_CLASSES:

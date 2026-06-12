@@ -67,12 +67,12 @@
   "output_settings": {
     "type": "object",
     "description": "输出设置",
-    "hint": "控制工具返回给 LLM 的内容长度",
+    "hint": "控制工具直接返回给 LLM 的内容长度",
     "items": {
       "max_output_chars": {
         "type": "int",
-        "description": "最大输出字符数",
-        "hint": "超过该长度会截断并标记 truncated=true，避免工具结果塞爆上下文",
+        "description": "最大直接返回字符数",
+        "hint": "超过该长度时，完整结果会保存到插件持久化目录，并在工具返回中提示文件路径、文件大小以及使用 AstrBot 文件搜索/读取工具查看。",
         "default": 12000,
         "slider": {
           "min": 1000,
