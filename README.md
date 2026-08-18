@@ -76,17 +76,22 @@ Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://d
 
 ## 工具
 
-| 工具名 | 用途 |
-|--------|------|
-| `cf_browser_markdown` | 抓取 URL 或 HTML 并返回 Markdown |
-| `cf_browser_content` | 抓取 URL 或 HTML 并返回 HTML |
-| `cf_browser_links` | 提取页面链接 |
-| `cf_browser_scrape` | 按 CSS selector 抓取页面元素 |
-| `cf_browser_json` | 抽取结构化 JSON |
-| `cf_browser_crawl_start` | 启动异步 Crawl 任务 |
-| `cf_browser_crawl_status` | 查询 Crawl 任务状态和结果 |
-| `cf_browser_crawl_cancel` | 取消 Crawl 任务 |
+| 工具名 | 用途 | JS 渲染 |
+|--------|------|---------|
+| `cf_browser_markdown` | 抓取 URL 或 HTML 并返回 Markdown | ✅ 默认渲染 |
+| `cf_browser_content` | 抓取 URL 或 HTML 并返回 HTML | ✅ 默认渲染 |
+| `cf_browser_links` | 提取页面链接 | ✅ 默认渲染 |
+| `cf_browser_scrape` | 按 CSS selector 抓取页面元素 | ✅ 默认渲染 |
+| `cf_browser_json` | 抽取结构化 JSON | ✅ 默认渲染 |
+| `cf_browser_crawl_start` | 启动异步 Crawl 任务 | ⚠️ 默认不渲染，需 `render: true` |
+| `cf_browser_crawl_status` | 查询 Crawl 任务状态和结果 | — |
+| `cf_browser_crawl_cancel` | 取消 Crawl 任务 | — |
 
+### JavaScript 渲染说明
+
+单页抓取工具（markdown/content/links/scrape/json）默认使用 headless Chrome 执行 JavaScript 后再提取内容，无需额外参数。
+
+Crawl 工具默认 `render=false`（快速 HTML 抓取，不执行 JS，不计 browser hours）。需要抓取 JS 渲染页面时传 `render: true`，但会消耗 browser hours 且更慢。可通过配置项 `default_render` 调整默认值。
 ## 示例
 
 ### 抓取 Markdown

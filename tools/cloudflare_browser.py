@@ -95,6 +95,9 @@ CRAWL_STATUSES = [
     "skipped",
     "cancelled",
 ]
+CRAWL_DEFAULT_LIMIT = 10
+CRAWL_DEFAULT_FORMATS = ["markdown"]
+CRAWL_DEFAULT_RENDER = False
 
 CF_KEY_MAP = {
     "action_timeout": "actionTimeout",
@@ -427,6 +430,7 @@ def _common_properties() -> dict[str, Any]:
     resource_schema = {
         "type": "array",
         "items": {"type": "string", "enum": RESOURCE_TYPES},
+        "description": "Resource type filter, e.g. document, image, script.",
     }
     return {
         "url": {"type": "string", "description": "URL to navigate to."},
@@ -444,76 +448,157 @@ def _common_properties() -> dict[str, Any]:
             "type": "object",
             "description": "Navigation options.",
             "properties": {
-                "wait_until": {"type": "string", "enum": WAIT_UNTIL},
-                "timeout": {"type": "integer", "minimum": 0, "maximum": 60000},
-                "referer": {"type": "string"},
-                "referrer_policy": {"type": "string"},
+                "wait_until": {
+                    "type": "string",
+                    "enum": WAIT_UNTIL,
+                    "description": "When to consider navigation done.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 60000,
+                    "description": "Navigation timeout in ms.",
+                },
+                "referer": {"type": "string", "description": "Referer header."},
+                "referrer_policy": {
+                    "type": "string",
+                    "description": "Referrer policy.",
+                },
             },
         },
         "wait_for_selector": {
             "type": "object",
+            "description": "Wait for a CSS selector to appear/disappear.",
             "properties": {
-                "selector": {"type": "string"},
-                "visible": {"type": "boolean"},
-                "hidden": {"type": "boolean"},
-                "timeout": {"type": "integer", "minimum": 0},
+                "selector": {"type": "string", "description": "CSS selector."},
+                "visible": {
+                    "type": "boolean",
+                    "description": "Wait until visible.",
+                },
+                "hidden": {
+                    "type": "boolean",
+                    "description": "Wait until hidden.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Wait timeout in ms.",
+                },
             },
         },
-        "wait_for_timeout": {"type": "integer", "minimum": 0, "maximum": 120000},
+        "wait_for_timeout": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 120000,
+            "description": "Wait a fixed duration in ms before action.",
+        },
         "viewport": {
             "type": "object",
+            "description": "Browser viewport settings.",
             "properties": {
-                "width": {"type": "integer", "minimum": 1},
-                "height": {"type": "integer", "minimum": 1},
-                "device_scale_factor": {"type": "number"},
-                "is_mobile": {"type": "boolean"},
-                "has_touch": {"type": "boolean"},
-                "is_landscape": {"type": "boolean"},
+                "width": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Width in px.",
+                },
+                "height": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Height in px.",
+                },
+                "device_scale_factor": {
+                    "type": "number",
+                    "description": "Device pixel ratio.",
+                },
+                "is_mobile": {"type": "boolean", "description": "Mobile emulation."},
+                "has_touch": {"type": "boolean", "description": "Touch emulation."},
+                "is_landscape": {
+                    "type": "boolean",
+                    "description": "Landscape orientation.",
+                },
             },
         },
-        "action_timeout": {"type": "integer", "minimum": 0, "maximum": 120000},
-        "best_attempt": {"type": "boolean"},
-        "set_javascript_enabled": {"type": "boolean"},
-        "user_agent": {"type": "string"},
-        "emulate_media_type": {"type": "string"},
+        "action_timeout": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 120000,
+            "description": "Max duration in ms for the browser action after page load.",
+        },
+        "best_attempt": {
+            "type": "boolean",
+            "description": "Return best available result on partial failure.",
+        },
+        "set_javascript_enabled": {
+            "type": "boolean",
+            "description": "Enable or disable JavaScript on the page.",
+        },
+        "user_agent": {"type": "string", "description": "Custom User-Agent string."},
+        "emulate_media_type": {
+            "type": "string",
+            "description": "Media type to emulate, e.g. screen or print.",
+        },
         "allow_resource_types": resource_schema,
         "reject_resource_types": resource_schema,
-        "allow_request_pattern": {"type": "array", "items": {"type": "string"}},
-        "reject_request_pattern": {"type": "array", "items": {"type": "string"}},
+        "allow_request_pattern": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "URL patterns to allow; mutually exclusive with reject_request_pattern.",
+        },
+        "reject_request_pattern": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "URL patterns to reject; mutually exclusive with allow_request_pattern.",
+        },
         "set_extra_http_headers": {
             "type": "object",
-            "additionalProperties": {"type": "string"},
-            "description": "Extra headers sent while loading the target page.",
+            "description": "Extra HTTP headers as key-value pairs (object keys are header names, values are strings).",
         },
         "authenticate": {
             "type": "object",
+            "description": "HTTP Basic authentication credentials.",
             "properties": {
-                "username": {"type": "string"},
-                "password": {"type": "string"},
+                "username": {"type": "string", "description": "Username."},
+                "password": {"type": "string", "description": "Password."},
             },
             "required": ["username", "password"],
         },
         "cookies": {
             "type": "array",
+            "description": "Cookies to set before navigation.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
-                    "value": {"type": "string"},
-                    "domain": {"type": "string"},
-                    "path": {"type": "string"},
-                    "url": {"type": "string"},
-                    "expires": {"type": "number"},
-                    "http_only": {"type": "boolean"},
-                    "secure": {"type": "boolean"},
-                    "same_site": {"type": "string", "enum": ["Strict", "Lax", "None"]},
-                    "priority": {"type": "string", "enum": ["Low", "Medium", "High"]},
-                    "partition_key": {"type": "string"},
-                    "same_party": {"type": "boolean"},
-                    "source_port": {"type": "number"},
+                    "name": {"type": "string", "description": "Cookie name."},
+                    "value": {"type": "string", "description": "Cookie value."},
+                    "domain": {"type": "string", "description": "Cookie domain."},
+                    "path": {"type": "string", "description": "Cookie path."},
+                    "url": {"type": "string", "description": "Cookie URL."},
+                    "expires": {
+                        "type": "number",
+                        "description": "Expiry Unix timestamp.",
+                    },
+                    "http_only": {"type": "boolean", "description": "HttpOnly flag."},
+                    "secure": {"type": "boolean", "description": "Secure flag."},
+                    "same_site": {
+                        "type": "string",
+                        "enum": ["Strict", "Lax", "None"],
+                        "description": "SameSite attribute.",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["Low", "Medium", "High"],
+                        "description": "Cookie priority.",
+                    },
+                    "partition_key": {
+                        "type": "string",
+                        "description": "Partition key.",
+                    },
+                    "same_party": {"type": "boolean", "description": "SameParty flag."},
+                    "source_port": {"type": "number", "description": "Source port."},
                     "source_scheme": {
                         "type": "string",
                         "enum": ["Unset", "NonSecure", "Secure"],
+                        "description": "Source scheme.",
                     },
                 },
                 "required": ["name", "value"],
@@ -521,23 +606,28 @@ def _common_properties() -> dict[str, Any]:
         },
         "add_script_tag": {
             "type": "array",
+            "description": "Inject <script> tags into the page.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string"},
-                    "content": {"type": "string"},
-                    "id": {"type": "string"},
-                    "type": {"type": "string"},
+                    "url": {"type": "string", "description": "Script URL."},
+                    "content": {
+                        "type": "string",
+                        "description": "Inline script content.",
+                    },
+                    "id": {"type": "string", "description": "Script element ID."},
+                    "type": {"type": "string", "description": "Script type attribute."},
                 },
             },
         },
         "add_style_tag": {
             "type": "array",
+            "description": "Inject <style> tags into the page.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string"},
-                    "content": {"type": "string"},
+                    "url": {"type": "string", "description": "Stylesheet URL."},
+                    "content": {"type": "string", "description": "Inline CSS content."},
                 },
             },
         },
@@ -553,7 +643,10 @@ def _page_parameters(
     schema: dict[str, Any] = {
         "type": "object",
         "properties": properties,
-        "description": "Provide either url or html. The tool validates this at runtime.",
+        "description": (
+            "Provide either url or html. The page is rendered with a headless browser "
+            "(JavaScript is executed by default). The tool validates url/html at runtime."
+        ),
     }
     if required:
         schema["required"] = required
@@ -668,10 +761,26 @@ class CloudflareBrowserRuntime:
             message = _json_dumps(safe_errors)
         else:
             message = raw_text or _json_dumps(data)
+        hint = _error_hint(status)
         return _redact_text(
-            f"错误：Cloudflare Browser Rendering API 返回 HTTP {status}：{message}",
+            f"错误：Cloudflare Browser Rendering API 返回 HTTP {status}：{message}{hint}",
             secrets,
         )
+
+
+_ERROR_HINTS = {
+    401: "（排查：API Token 无效或过期，请检查 api_token 配置。）",
+    403: "（排查：API Token 权限不足，需要 Browser Rendering - Edit 权限。）",
+    429: "（排查：请求频率超限或浏览器时间额度用尽，请降低调用频率或升级 Workers 计划。）",
+    400: "（排查：请求参数有误，请检查 url、selector 或格式是否符合要求。）",
+    404: "（排查：请求的资源不存在，crawl 任务 ID 可能已过期或无效。）",
+    500: "（排查：Cloudflare 服务端错误，可稍后重试。）",
+}
+
+
+def _error_hint(status: int) -> str:
+    """返回常见 HTTP 错误码的排查建议。"""
+    return _ERROR_HINTS.get(status, "")
 
 
 def _query_params(
@@ -732,6 +841,17 @@ def _validate_body_enums(body: dict[str, Any]) -> str | None:
         body.get("reject_resource_types")
     ):
         return "错误：allow_resource_types 和 reject_resource_types 不能同时设置。"
+
+    headers = body.get("set_extra_http_headers")
+    if isinstance(headers, dict) and headers:
+        non_string = [
+            key for key, value in headers.items() if not isinstance(value, str)
+        ]
+        if non_string:
+            return (
+                f"错误：set_extra_http_headers 的值必须都是字符串，"
+                f"以下键的值不是字符串：{', '.join(non_string)}"
+            )
 
     for field_name in ("allow_resource_types", "reject_resource_types"):
         values = [str(value) for value in _list_from_value(body.get(field_name))]
@@ -794,7 +914,8 @@ class _CloudflareTool(FunctionTool[AstrAgentContext]):
 class CloudflareMarkdownTool(_CloudflareTool):
     name: str = "cf_browser_markdown"
     description: str = (
-        "Fetch a URL or HTML through Cloudflare Browser Rendering and return Markdown."
+        "Fetch a URL or HTML through Cloudflare Browser Rendering and return Markdown. "
+        "JavaScript is executed by default (headless Chrome renders the page first)."
     )
     parameters: dict = Field(default_factory=_page_parameters)
 
@@ -809,7 +930,10 @@ class CloudflareMarkdownTool(_CloudflareTool):
 @dataclass(config={"arbitrary_types_allowed": True})
 class CloudflareContentTool(_CloudflareTool):
     name: str = "cf_browser_content"
-    description: str = "Fetch a URL or HTML through Cloudflare Browser Rendering and return rendered HTML content."
+    description: str = (
+        "Fetch a URL or HTML through Cloudflare Browser Rendering and return rendered HTML content. "
+        "JavaScript is executed by default (headless Chrome renders the page first)."
+    )
     parameters: dict = Field(default_factory=_page_parameters)
 
     async def call(
@@ -822,13 +946,20 @@ class CloudflareContentTool(_CloudflareTool):
 class CloudflareLinksTool(_CloudflareTool):
     name: str = "cf_browser_links"
     description: str = (
-        "Extract links from a URL or HTML through Cloudflare Browser Rendering."
+        "Extract links from a URL or HTML through Cloudflare Browser Rendering. "
+        "JavaScript is executed by default (headless Chrome renders the page first)."
     )
     parameters: dict = Field(
         default_factory=lambda: _page_parameters(
             {
-                "exclude_external_links": {"type": "boolean", "default": False},
-                "visible_links_only": {"type": "boolean", "default": False},
+                "exclude_external_links": {
+                    "type": "boolean",
+                    "description": "Exclude links pointing to external domains. Default is false.",
+                },
+                "visible_links_only": {
+                    "type": "boolean",
+                    "description": "Return only visible links. Default is false.",
+                },
             }
         )
     )
@@ -848,16 +979,25 @@ class CloudflareLinksTool(_CloudflareTool):
 @dataclass(config={"arbitrary_types_allowed": True})
 class CloudflareScrapeTool(_CloudflareTool):
     name: str = "cf_browser_scrape"
-    description: str = "Scrape specific page elements using CSS selectors through Cloudflare Browser Rendering."
+    description: str = (
+        "Scrape specific page elements using CSS selectors through Cloudflare Browser Rendering. "
+        "JavaScript is executed by default (headless Chrome renders the page first)."
+    )
     parameters: dict = Field(
         default_factory=lambda: _page_parameters(
             {
                 "elements": {
                     "type": "array",
                     "minItems": 1,
+                    "description": "CSS selectors to extract.",
                     "items": {
                         "type": "object",
-                        "properties": {"selector": {"type": "string"}},
+                        "properties": {
+                            "selector": {
+                                "type": "string",
+                                "description": "CSS selector string.",
+                            }
+                        },
                         "required": ["selector"],
                     },
                 }
@@ -879,7 +1019,10 @@ class CloudflareScrapeTool(_CloudflareTool):
 @dataclass(config={"arbitrary_types_allowed": True})
 class CloudflareJsonTool(_CloudflareTool):
     name: str = "cf_browser_json"
-    description: str = "Extract structured JSON from a URL or HTML using Cloudflare Browser Rendering JSON extraction."
+    description: str = (
+        "Extract structured JSON from a URL or HTML using Cloudflare Browser Rendering JSON extraction. "
+        "JavaScript is executed by default (headless Chrome renders the page first)."
+    )
     parameters: dict = Field(
         default_factory=lambda: _page_parameters(
             {
@@ -889,19 +1032,33 @@ class CloudflareJsonTool(_CloudflareTool):
                 },
                 "response_format": {
                     "type": "object",
+                    "description": "Expected output format.",
                     "properties": {
-                        "type": {"type": "string"},
-                        "json_schema": {"type": "object"},
+                        "type": {
+                            "type": "string",
+                            "description": "Format type, e.g. json_schema.",
+                        },
+                        "json_schema": {
+                            "type": "object",
+                            "description": "JSON Schema defining the output structure.",
+                        },
                     },
                     "required": ["type"],
                 },
                 "custom_ai": {
                     "type": "array",
+                    "description": "Custom AI models for extraction (BYO API key).",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "model": {"type": "string"},
-                            "authorization": {"type": "string"},
+                            "model": {
+                                "type": "string",
+                                "description": "Model ID as provider/model.",
+                            },
+                            "authorization": {
+                                "type": "string",
+                                "description": "Bearer token or API key.",
+                            },
                         },
                         "required": ["model"],
                     },
@@ -926,7 +1083,9 @@ class CloudflareJsonTool(_CloudflareTool):
 class CloudflareCrawlStartTool(_CloudflareTool):
     name: str = "cf_browser_crawl_start"
     description: str = (
-        "Start an asynchronous Cloudflare Browser Run crawl job for a website."
+        "Start an asynchronous Cloudflare Browser Run crawl job for a website. "
+        "By default render is false (fast HTML fetch without JavaScript). "
+        "Set render=true to execute JavaScript on each page (slower, costs browser hours)."
     )
     parameters: dict = Field(
         default_factory=lambda: {
@@ -938,47 +1097,97 @@ class CloudflareCrawlStartTool(_CloudflareTool):
                     if key not in {"html", "user_agent"}
                 },
                 "url": {"type": "string", "description": "Starting URL for the crawl."},
-                "limit": {"type": "integer", "minimum": 1},
-                "depth": {"type": "integer", "minimum": 1, "maximum": 100000},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Max pages to crawl. Default 10, capped by plugin max_crawl_limit.",
+                },
+                "depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100000,
+                    "description": "Max link depth from starting URL.",
+                },
                 "formats": {
                     "type": "array",
                     "items": {"type": "string", "enum": CRAWL_FORMATS},
+                    "description": "Response formats: html, markdown, json. Default is markdown.",
                 },
-                "render": {"type": "boolean"},
-                "source": {"type": "string", "enum": LINK_SOURCES},
-                "max_age": {"type": "integer", "minimum": 0, "maximum": 604800},
-                "modified_since": {"type": "integer", "minimum": 1},
+                "render": {
+                    "type": "boolean",
+                    "description": "If true, execute JavaScript on each page (headless Chrome). Default is false (fast HTML fetch).",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": LINK_SOURCES,
+                    "description": "URL discovery source: all, sitemaps, or links. Default is all.",
+                },
+                "max_age": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800,
+                    "description": "Max cache age in seconds before re-fetching. Default 86400.",
+                },
+                "modified_since": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Unix timestamp (seconds); only crawl pages modified since then.",
+                },
                 "crawl_purposes": {
                     "type": "array",
                     "items": {"type": "string", "enum": CRAWL_PURPOSES},
+                    "description": "Declared content usage: search, ai-input, ai-train.",
                 },
                 "options": {
                     "type": "object",
+                    "description": "Crawl scope options.",
                     "properties": {
-                        "include_external_links": {"type": "boolean"},
-                        "include_subdomains": {"type": "boolean"},
+                        "include_external_links": {
+                            "type": "boolean",
+                            "description": "Follow links to external domains. Default false.",
+                        },
+                        "include_subdomains": {
+                            "type": "boolean",
+                            "description": "Follow links to subdomains. Default false.",
+                        },
                         "include_patterns": {
                             "type": "array",
                             "items": {"type": "string"},
+                            "description": "Wildcard patterns; only visit matching URLs.",
                         },
                         "exclude_patterns": {
                             "type": "array",
                             "items": {"type": "string"},
+                            "description": "Wildcard patterns; skip matching URLs. Takes priority over include.",
                         },
                     },
                 },
                 "json_options": {
                     "type": "object",
+                    "description": "Options for json format extraction (required if formats includes json).",
                     "properties": {
-                        "prompt": {"type": "string"},
-                        "response_format": {"type": "object"},
+                        "prompt": {
+                            "type": "string",
+                            "description": "Extraction instruction.",
+                        },
+                        "response_format": {
+                            "type": "object",
+                            "description": "Expected output JSON schema.",
+                        },
                         "custom_ai": {
                             "type": "array",
+                            "description": "Custom AI models (BYO API key).",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "model": {"type": "string"},
-                                    "authorization": {"type": "string"},
+                                    "model": {
+                                        "type": "string",
+                                        "description": "Model ID as provider/model.",
+                                    },
+                                    "authorization": {
+                                        "type": "string",
+                                        "description": "Bearer token or API key.",
+                                    },
                                 },
                                 "required": ["model"],
                             },
@@ -1000,7 +1209,11 @@ class CloudflareCrawlStartTool(_CloudflareTool):
         max_crawl_limit = _to_int(
             runtime.cfg("max_crawl_limit"), CONFIG_DEFAULTS["max_crawl_limit"], 1
         )
-        requested_limit = _to_int(kwargs.get("limit", min(10, max_crawl_limit)), 10, 1)
+        requested_limit = _to_int(
+            kwargs.get("limit", min(CRAWL_DEFAULT_LIMIT, max_crawl_limit)),
+            CRAWL_DEFAULT_LIMIT,
+            1,
+        )
         if requested_limit > max_crawl_limit:
             return f"错误：limit 超过插件配置的 max_crawl_limit（{max_crawl_limit}）。"
 
@@ -1040,8 +1253,10 @@ class CloudflareCrawlStartTool(_CloudflareTool):
             if field_name in kwargs
         }
         body["limit"] = requested_limit
-        body.setdefault("render", _to_bool(runtime.cfg("default_render"), False))
-        body.setdefault("formats", ["markdown"])
+        body.setdefault(
+            "render", _to_bool(runtime.cfg("default_render"), CRAWL_DEFAULT_RENDER)
+        )
+        body.setdefault("formats", list(CRAWL_DEFAULT_FORMATS))
         error = _validate_crawl_body(body)
         if error:
             return error
@@ -1099,11 +1314,28 @@ class CloudflareCrawlStatusTool(_CloudflareTool):
         default_factory=lambda: {
             "type": "object",
             "properties": {
-                "job_id": {"type": "string"},
-                "status": {"type": "string", "enum": CRAWL_STATUSES},
-                "cursor": {"type": "integer", "minimum": 0},
-                "limit": {"type": "integer", "minimum": 1},
-                "cache_ttl": {"type": "integer", "minimum": 0, "maximum": 86400},
+                "job_id": {"type": "string", "description": "Crawl job ID."},
+                "status": {
+                    "type": "string",
+                    "enum": CRAWL_STATUSES,
+                    "description": "Filter records by status: queued, completed, disallowed, skipped, errored, cancelled.",
+                },
+                "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Pagination cursor from previous response.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Max records to return.",
+                },
+                "cache_ttl": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 86400,
+                    "description": "Cache TTL in seconds. 0 disables cache.",
+                },
             },
             "required": ["job_id"],
         }
@@ -1146,7 +1378,9 @@ class CloudflareCrawlCancelTool(_CloudflareTool):
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}},
+            "properties": {
+                "job_id": {"type": "string", "description": "Crawl job ID to cancel."}
+            },
             "required": ["job_id"],
         }
     )
