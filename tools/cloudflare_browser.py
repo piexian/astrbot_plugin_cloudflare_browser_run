@@ -95,6 +95,9 @@ CRAWL_STATUSES = [
     "skipped",
     "cancelled",
 ]
+CRAWL_DEFAULT_LIMIT = 10
+CRAWL_DEFAULT_FORMATS = ["markdown"]
+CRAWL_DEFAULT_RENDER = False
 
 CF_KEY_MAP = {
     "action_timeout": "actionTimeout",
@@ -493,15 +496,26 @@ def _common_properties() -> dict[str, Any]:
             "type": "object",
             "description": "Browser viewport settings.",
             "properties": {
-                "width": {"type": "integer", "minimum": 1, "description": "Width in px."},
-                "height": {"type": "integer", "minimum": 1, "description": "Height in px."},
+                "width": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Width in px.",
+                },
+                "height": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Height in px.",
+                },
                 "device_scale_factor": {
                     "type": "number",
                     "description": "Device pixel ratio.",
                 },
                 "is_mobile": {"type": "boolean", "description": "Mobile emulation."},
                 "has_touch": {"type": "boolean", "description": "Touch emulation."},
-                "is_landscape": {"type": "boolean", "description": "Landscape orientation."},
+                "is_landscape": {
+                    "type": "boolean",
+                    "description": "Landscape orientation.",
+                },
             },
         },
         "action_timeout": {
@@ -559,7 +573,10 @@ def _common_properties() -> dict[str, Any]:
                     "domain": {"type": "string", "description": "Cookie domain."},
                     "path": {"type": "string", "description": "Cookie path."},
                     "url": {"type": "string", "description": "Cookie URL."},
-                    "expires": {"type": "number", "description": "Expiry Unix timestamp."},
+                    "expires": {
+                        "type": "number",
+                        "description": "Expiry Unix timestamp.",
+                    },
                     "http_only": {"type": "boolean", "description": "HttpOnly flag."},
                     "secure": {"type": "boolean", "description": "Secure flag."},
                     "same_site": {
@@ -572,7 +589,10 @@ def _common_properties() -> dict[str, Any]:
                         "enum": ["Low", "Medium", "High"],
                         "description": "Cookie priority.",
                     },
-                    "partition_key": {"type": "string", "description": "Partition key."},
+                    "partition_key": {
+                        "type": "string",
+                        "description": "Partition key.",
+                    },
                     "same_party": {"type": "boolean", "description": "SameParty flag."},
                     "source_port": {"type": "number", "description": "Source port."},
                     "source_scheme": {
@@ -591,7 +611,10 @@ def _common_properties() -> dict[str, Any]:
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "Script URL."},
-                    "content": {"type": "string", "description": "Inline script content."},
+                    "content": {
+                        "type": "string",
+                        "description": "Inline script content.",
+                    },
                     "id": {"type": "string", "description": "Script element ID."},
                     "type": {"type": "string", "description": "Script type attribute."},
                 },
@@ -759,6 +782,7 @@ def _error_hint(status: int) -> str:
     """返回常见 HTTP 错误码的排查建议。"""
     return _ERROR_HINTS.get(status, "")
 
+
 def _query_params(
     runtime: CloudflareBrowserRuntime, kwargs: dict[str, Any]
 ) -> dict[str, Any]:
@@ -817,6 +841,17 @@ def _validate_body_enums(body: dict[str, Any]) -> str | None:
         body.get("reject_resource_types")
     ):
         return "错误：allow_resource_types 和 reject_resource_types 不能同时设置。"
+
+    headers = body.get("set_extra_http_headers")
+    if isinstance(headers, dict) and headers:
+        non_string = [
+            key for key, value in headers.items() if not isinstance(value, str)
+        ]
+        if non_string:
+            return (
+                f"错误：set_extra_http_headers 的值必须都是字符串，"
+                f"以下键的值不是字符串：{', '.join(non_string)}"
+            )
 
     for field_name in ("allow_resource_types", "reject_resource_types"):
         values = [str(value) for value in _list_from_value(body.get(field_name))]
@@ -883,6 +918,7 @@ class CloudflareMarkdownTool(_CloudflareTool):
         "JavaScript is executed by default (headless Chrome renders the page first)."
     )
     parameters: dict = Field(default_factory=_page_parameters)
+
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
@@ -1130,7 +1166,10 @@ class CloudflareCrawlStartTool(_CloudflareTool):
                     "type": "object",
                     "description": "Options for json format extraction (required if formats includes json).",
                     "properties": {
-                        "prompt": {"type": "string", "description": "Extraction instruction."},
+                        "prompt": {
+                            "type": "string",
+                            "description": "Extraction instruction.",
+                        },
                         "response_format": {
                             "type": "object",
                             "description": "Expected output JSON schema.",
@@ -1170,7 +1209,11 @@ class CloudflareCrawlStartTool(_CloudflareTool):
         max_crawl_limit = _to_int(
             runtime.cfg("max_crawl_limit"), CONFIG_DEFAULTS["max_crawl_limit"], 1
         )
-        requested_limit = _to_int(kwargs.get("limit", min(10, max_crawl_limit)), 10, 1)
+        requested_limit = _to_int(
+            kwargs.get("limit", min(CRAWL_DEFAULT_LIMIT, max_crawl_limit)),
+            CRAWL_DEFAULT_LIMIT,
+            1,
+        )
         if requested_limit > max_crawl_limit:
             return f"错误：limit 超过插件配置的 max_crawl_limit（{max_crawl_limit}）。"
 
@@ -1210,8 +1253,10 @@ class CloudflareCrawlStartTool(_CloudflareTool):
             if field_name in kwargs
         }
         body["limit"] = requested_limit
-        body.setdefault("render", _to_bool(runtime.cfg("default_render"), False))
-        body.setdefault("formats", ["markdown"])
+        body.setdefault(
+            "render", _to_bool(runtime.cfg("default_render"), CRAWL_DEFAULT_RENDER)
+        )
+        body.setdefault("formats", list(CRAWL_DEFAULT_FORMATS))
         error = _validate_crawl_body(body)
         if error:
             return error
@@ -1333,7 +1378,9 @@ class CloudflareCrawlCancelTool(_CloudflareTool):
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
-            "properties": {"job_id": {"type": "string", "description": "Crawl job ID to cancel."}},
+            "properties": {
+                "job_id": {"type": "string", "description": "Crawl job ID to cancel."}
+            },
             "required": ["job_id"],
         }
     )
