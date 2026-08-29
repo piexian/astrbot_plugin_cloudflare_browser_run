@@ -72,6 +72,8 @@ Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://d
 - `content_chars`: 原始 JSON 字符数
 - `suggested_tools`: 建议使用 `astrbot_grep_tool` 搜索文件，或使用 `astrbot_file_read_tool` 分段读取
 
+沙盒适配：当 AstrBot 的 `computer_use_runtime` 为 `sandbox` 时，插件会自动把结果文件上传到当前会话沙盒，返回的 `file_path` 为沙盒内路径（同时附带 `host_file_path` 与 `sandbox_synced: true`），沙盒内的文件工具可直接读取；上传失败或未启用文件工具运行时时，返回会附带 `preview` 内容预览兜底。
+
 工具启停使用 AstrBot 自带的 LLM Tool 管理功能控制。插件初始化时会注册全部工具。
 
 ## 工具

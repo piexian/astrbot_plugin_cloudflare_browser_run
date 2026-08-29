@@ -1,5 +1,15 @@
 # 更新日志
 
+## v1.1.2
+
+- 修复兜底响应可能超过 `max_output_chars`：preview 改为按序列化后元数据预留空间动态截断，兜底 JSON 整体不超限。
+- 沙盒同步失败消息中的错误详情截断至 200 字符，避免长错误信息吃掉 preview 预算。
+
+## v1.1.1
+
+- 修复沙盒运行时下超长结果文件不可达：检测到 `computer_use_runtime=sandbox` 时自动将结果文件上传到当前会话沙盒，返回沙盒内 `file_path`（附 `host_file_path`、`sandbox_synced`）。
+- 沙盒上传失败或未启用 Computer Use 运行时时，返回附带 `preview` 内容预览兜底。
+
 ## v1.1.0
 
 - 补全全部工具参数 description，LLM 可理解各参数用途。

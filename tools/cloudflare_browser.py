@@ -23,6 +23,10 @@ try:
     from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 except Exception:  # pragma: no cover - compatibility with older AstrBot builds
     get_astrbot_plugin_data_path = None
+try:
+    from astrbot.core.computer.computer_client import get_booter
+except Exception:  # pragma: no cover - compatibility with older AstrBot builds
+    get_booter = None
 
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
@@ -347,7 +351,52 @@ def _write_large_payload(payload: dict[str, Any], data_dir: Path) -> tuple[Path,
     return path.resolve(strict=False), path.stat().st_size
 
 
-def _tool_payload(payload: dict[str, Any], max_chars: int, data_dir: Path) -> str:
+def _computer_use_runtime(context: Any) -> str:
+    """读取当前会话的 Computer Use 运行时配置，异常时按 local 处理。"""
+    try:
+        umo = context.context.event.unified_msg_origin
+        cfg = context.context.context.get_config(umo=umo)
+        runtime = str(
+            cfg.get("provider_settings", {}).get("computer_use_runtime", "local")
+        )
+    except Exception:
+        return "local"
+    return runtime if runtime in {"local", "sandbox", "none"} else "local"
+
+
+async def _upload_result_to_sandbox(context: Any, file_path: Path) -> str:
+    """把结果文件上传到当前会话沙盒并返回沙盒侧路径，失败抛异常由调用方回退。"""
+    if get_booter is None:
+        raise RuntimeError("当前 AstrBot 版本不支持沙盒文件上传。")
+    umo = context.context.event.unified_msg_origin
+    booter = await get_booter(context.context.context, umo)
+    result = await booter.upload_file(str(file_path), file_path.name)
+    if not result.get("success", False):
+        raise RuntimeError(
+            str(result.get("error") or result.get("message") or "unknown error")
+        )
+    return str(result.get("file_path") or file_path.name)
+
+
+def _file_suggested_tools(path: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "astrbot_grep_tool",
+            "args": {"path": path, "pattern": "要搜索的关键词"},
+        },
+        {
+            "name": "astrbot_file_read_tool",
+            "args": {"path": path, "offset": 0, "limit": 120},
+        },
+    ]
+
+
+async def _tool_payload(
+    payload: dict[str, Any],
+    max_chars: int,
+    data_dir: Path,
+    context: ContextWrapper[AstrAgentContext] | None = None,
+) -> str:
     max_chars = max(1000, int(max_chars or CONFIG_DEFAULTS["max_output_chars"]))
     dumped = _json_dumps(payload)
     if len(dumped) <= max_chars:
@@ -368,31 +417,73 @@ def _tool_payload(payload: dict[str, Any], max_chars: int, data_dir: Path) -> st
         }
         return _json_dumps(compact)
 
-    compact = {
+    compact: dict[str, Any] = {
         "saved_to_file": True,
         "type": payload.get("type"),
         "url": payload.get("url"),
-        "file_path": str(file_path),
         "file_size_bytes": file_size_bytes,
         "file_size": _format_bytes(file_size_bytes),
         "content_chars": len(dumped),
         "max_output_chars": max_chars,
-        "message": (
+    }
+
+    runtime = _computer_use_runtime(context) if context is not None else "local"
+    sandbox_path: str | None = None
+    sandbox_error: str | None = None
+    if runtime == "sandbox":
+        try:
+            sandbox_path = await _upload_result_to_sandbox(context, file_path)
+        except Exception as exc:
+            sandbox_error = str(exc)
+
+    if sandbox_path is not None:
+        # 沙盒运行时：沙盒内文件工具读不到宿主路径，统一改用沙盒侧路径
+        compact["sandbox_synced"] = True
+        compact["file_path"] = sandbox_path
+        compact["host_file_path"] = str(file_path)
+        compact["message"] = (
+            "结果超过最大直接返回长度，已保存到插件持久化目录，并已同步到当前会话沙盒。"
+            "file_path 为沙盒内路径，请使用 astrbot_grep_tool 在其中搜索关键词，"
+            "或使用 astrbot_file_read_tool 按行分段读取。"
+        )
+        compact["suggested_tools"] = _file_suggested_tools(sandbox_path)
+        return _json_dumps(compact)
+
+    compact["file_path"] = str(file_path)
+    if runtime == "local":
+        compact["message"] = (
             "结果超过最大直接返回长度，已保存到插件持久化目录。"
             "请使用 astrbot_grep_tool 在 file_path 中搜索关键词，"
             "或使用 astrbot_file_read_tool 按行分段读取。"
-        ),
-        "suggested_tools": [
-            {
-                "name": "astrbot_grep_tool",
-                "args": {"path": str(file_path), "pattern": "要搜索的关键词"},
-            },
-            {
-                "name": "astrbot_file_read_tool",
-                "args": {"path": str(file_path), "offset": 0, "limit": 120},
-            },
-        ],
-    }
+        )
+        compact["suggested_tools"] = _file_suggested_tools(str(file_path))
+        return _json_dumps(compact)
+
+    # 沙盒同步失败或未启用文件工具运行时：附内容预览兜底，避免 LLM 拿不到任何内容
+    compact["sandbox_synced"] = False
+    if runtime == "sandbox":
+        compact["message"] = (
+            "结果超过最大直接返回长度，已保存到宿主插件持久化目录，"
+            # 限制错误长度，避免元数据本身吃掉 preview 预算
+            f"但同步到当前会话沙盒失败：{str(sandbox_error)[:200]}。"
+            "file_path 为宿主机路径，沙盒内的文件工具无法直接访问；"
+            "可请管理员先用 astrbot_upload_file 将 file_path 传入沙盒，"
+            "或直接参考 preview 中的内容预览。"
+        )
+    else:
+        compact["message"] = (
+            "结果超过最大直接返回长度，已保存到插件持久化目录。"
+            "当前未启用 Computer Use 运行时，文件搜索/读取工具不可用；"
+            "请直接参考 preview 中的内容预览，或启用本地/沙盒运行时后按 file_path 读取。"
+        )
+
+    # 先按序列化后的元数据预留空间再截断 preview，保证兜底 JSON 整体不超 max_chars
+    compact["preview"] = ""
+    budget = max(0, max_chars - len(_json_dumps(compact)))
+    compact["preview"] = dumped[:budget]
+    while compact["preview"] and len(_json_dumps(compact)) > max_chars:
+        budget = max(0, budget - 200)
+        compact["preview"] = dumped[:budget]
     return _json_dumps(compact)
 
 
@@ -875,6 +966,7 @@ async def _call_page_endpoint(
     result_type: str,
     kwargs: dict[str, Any],
     extra_fields: list[str] | None = None,
+    context: ContextWrapper[AstrAgentContext] | None = None,
 ) -> str:
     body, error = _page_body(kwargs, extra_fields)
     if error:
@@ -889,7 +981,7 @@ async def _call_page_endpoint(
         )
     except CloudflareAPIError as exc:
         return str(exc)
-    return _tool_payload(
+    return await _tool_payload(
         {
             "type": result_type,
             "url": kwargs.get("url"),
@@ -897,6 +989,7 @@ async def _call_page_endpoint(
         },
         runtime.max_output_chars,
         runtime.data_dir,
+        context,
     )
 
 
@@ -923,7 +1016,7 @@ class CloudflareMarkdownTool(_CloudflareTool):
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
         return await _call_page_endpoint(
-            self._runtime(), "markdown", "markdown", kwargs
+            self._runtime(), "markdown", "markdown", kwargs, context=context
         )
 
 
@@ -939,7 +1032,9 @@ class CloudflareContentTool(_CloudflareTool):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        return await _call_page_endpoint(self._runtime(), "content", "content", kwargs)
+        return await _call_page_endpoint(
+            self._runtime(), "content", "content", kwargs, context=context
+        )
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -973,6 +1068,7 @@ class CloudflareLinksTool(_CloudflareTool):
             "links",
             kwargs,
             ["exclude_external_links", "visible_links_only"],
+            context,
         )
 
 
@@ -1012,7 +1108,7 @@ class CloudflareScrapeTool(_CloudflareTool):
         if not _is_present(kwargs.get("elements")):
             return "错误：elements 至少需要包含一个 selector。"
         return await _call_page_endpoint(
-            self._runtime(), "scrape", "scrape", kwargs, ["elements"]
+            self._runtime(), "scrape", "scrape", kwargs, ["elements"], context
         )
 
 
@@ -1076,6 +1172,7 @@ class CloudflareJsonTool(_CloudflareTool):
             "json",
             kwargs,
             ["prompt", "response_format", "custom_ai"],
+            context,
         )
 
 
@@ -1270,10 +1367,11 @@ class CloudflareCrawlStartTool(_CloudflareTool):
             )
         except CloudflareAPIError as exc:
             return str(exc)
-        return _tool_payload(
+        return await _tool_payload(
             {"type": "crawl_start", "job_id": job_id, "message": "Crawl 任务已启动。"},
             runtime.max_output_chars,
             runtime.data_dir,
+            context,
         )
 
 
@@ -1368,7 +1466,9 @@ class CloudflareCrawlStatusTool(_CloudflareTool):
             "type": "crawl_status",
             **(result if isinstance(result, dict) else {"result": result}),
         }
-        return _tool_payload(payload, runtime.max_output_chars, runtime.data_dir)
+        return await _tool_payload(
+            payload, runtime.max_output_chars, runtime.data_dir, context
+        )
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -1400,7 +1500,9 @@ class CloudflareCrawlCancelTool(_CloudflareTool):
             "type": "crawl_cancel",
             **(result if isinstance(result, dict) else {"result": result}),
         }
-        return _tool_payload(payload, runtime.max_output_chars, runtime.data_dir)
+        return await _tool_payload(
+            payload, runtime.max_output_chars, runtime.data_dir, context
+        )
 
 
 TOOL_CLASSES = (
