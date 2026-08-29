@@ -461,11 +461,11 @@ async def _tool_payload(
 
     # 沙盒同步失败或未启用文件工具运行时：附内容预览兜底，避免 LLM 拿不到任何内容
     compact["sandbox_synced"] = False
-    compact["preview"] = dumped[: max(200, max_chars - 260)]
     if runtime == "sandbox":
         compact["message"] = (
             "结果超过最大直接返回长度，已保存到宿主插件持久化目录，"
-            f"但同步到当前会话沙盒失败：{sandbox_error}。"
+            # 限制错误长度，避免元数据本身吃掉 preview 预算
+            f"但同步到当前会话沙盒失败：{str(sandbox_error)[:200]}。"
             "file_path 为宿主机路径，沙盒内的文件工具无法直接访问；"
             "可请管理员先用 astrbot_upload_file 将 file_path 传入沙盒，"
             "或直接参考 preview 中的内容预览。"
@@ -476,6 +476,14 @@ async def _tool_payload(
             "当前未启用 Computer Use 运行时，文件搜索/读取工具不可用；"
             "请直接参考 preview 中的内容预览，或启用本地/沙盒运行时后按 file_path 读取。"
         )
+
+    # 先按序列化后的元数据预留空间再截断 preview，保证兜底 JSON 整体不超 max_chars
+    compact["preview"] = ""
+    budget = max(0, max_chars - len(_json_dumps(compact)))
+    compact["preview"] = dumped[:budget]
+    while compact["preview"] and len(_json_dumps(compact)) > max_chars:
+        budget = max(0, budget - 200)
+        compact["preview"] = dumped[:budget]
     return _json_dumps(compact)
 
 
