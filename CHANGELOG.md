@@ -1,5 +1,10 @@
 # 更新日志
 
+## v1.1.1
+
+- 修复沙盒运行时下超长结果文件不可达：检测到 `computer_use_runtime=sandbox` 时自动将结果文件上传到当前会话沙盒，返回沙盒内 `file_path`（附 `host_file_path`、`sandbox_synced`）。
+- 沙盒上传失败或未启用 Computer Use 运行时时，返回附带 `preview` 内容预览兜底。
+
 ## v1.1.0
 
 - 补全全部工具参数 description，LLM 可理解各参数用途。
