@@ -162,6 +162,18 @@ class CloudflareAPIError(Exception):
     """Cloudflare API 请求失败。"""
 
 
+class CloudflareParamError(ValueError):
+    """本地参数校验失败；消息与 LLM Tool 的错误展示保持一致（以“错误：”开头）。"""
+
+
+def missing_credentials(config: dict[str, Any]) -> str | None:
+    """返回缺失的凭据键名；配置齐全时返回 None。只读内存配置，无任何副作用。"""
+    for key in ("account_id", "api_token"):
+        if not str(_cfg(config, key) or "").strip():
+            return key
+    return None
+
+
 def _is_present(value: Any) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
@@ -769,10 +781,9 @@ class CloudflareBrowserRuntime:
         )
 
     def validate_credentials(self) -> str | None:
-        if not str(self.cfg("account_id") or "").strip():
-            return "错误：未配置 Cloudflare account_id。"
-        if not str(self.cfg("api_token") or "").strip():
-            return "错误：未配置 Cloudflare api_token。"
+        missing = missing_credentials(self.config)
+        if missing:
+            return f"错误：未配置 Cloudflare {missing}。"
         return None
 
     async def request(
@@ -858,6 +869,151 @@ class CloudflareBrowserRuntime:
             secrets,
         )
 
+    # ---- 具名共享业务入口：LLM Tool 与 SDK 服务都走这一条路径 ----
+
+    async def page(self, endpoint: str, **kwargs: Any) -> dict[str, Any]:
+        """单页抓取（markdown/content/links/scrape/json），返回 {type, url, result}。"""
+        if endpoint == "scrape" and not _is_present(kwargs.get("elements")):
+            raise CloudflareParamError("错误：elements 至少需要包含一个 selector。")
+        body, error = _page_body(kwargs, _PAGE_EXTRA_FIELDS.get(endpoint))
+        if error:
+            raise CloudflareParamError(error)
+        result = await self.request(
+            "POST", endpoint, params=_query_params(self, kwargs), body=body
+        )
+        return {"type": endpoint, "url": kwargs.get("url"), "result": result}
+
+    async def page_markdown(
+        self, *, url: Any = None, html: Any = None, **options: Any
+    ) -> dict[str, Any]:
+        return await self.page("markdown", url=url, html=html, **options)
+
+    async def page_content(
+        self, *, url: Any = None, html: Any = None, **options: Any
+    ) -> dict[str, Any]:
+        return await self.page("content", url=url, html=html, **options)
+
+    async def page_links(
+        self, *, url: Any = None, html: Any = None, **options: Any
+    ) -> dict[str, Any]:
+        return await self.page("links", url=url, html=html, **options)
+
+    async def page_scrape(
+        self, *, url: Any = None, html: Any = None, elements: Any = None, **options: Any
+    ) -> dict[str, Any]:
+        return await self.page(
+            "scrape", url=url, html=html, elements=elements, **options
+        )
+
+    async def page_json(
+        self, *, url: Any = None, html: Any = None, **options: Any
+    ) -> dict[str, Any]:
+        return await self.page("json", url=url, html=html, **options)
+
+    async def crawl_start(self, url: Any = None, **options: Any) -> dict[str, Any]:
+        """启动异步 Crawl 任务，返回 {type, job_id, message}。"""
+        if not _is_present(url):
+            raise CloudflareParamError("错误：必须提供 url。")
+        options = {"url": url, **options}
+
+        max_crawl_limit = _to_int(
+            self.cfg("max_crawl_limit"), CONFIG_DEFAULTS["max_crawl_limit"], 1
+        )
+        requested_limit = _to_int(
+            options.get("limit", min(CRAWL_DEFAULT_LIMIT, max_crawl_limit)),
+            CRAWL_DEFAULT_LIMIT,
+            1,
+        )
+        if requested_limit > max_crawl_limit:
+            raise CloudflareParamError(
+                f"错误：limit 超过插件配置的 max_crawl_limit（{max_crawl_limit}）。"
+            )
+
+        fields = [
+            "url",
+            "limit",
+            "depth",
+            "formats",
+            "render",
+            "source",
+            "max_age",
+            "modified_since",
+            "crawl_purposes",
+            "options",
+            "json_options",
+            "goto_options",
+            "wait_for_selector",
+            "wait_for_timeout",
+            "viewport",
+            "action_timeout",
+            "best_attempt",
+            "set_javascript_enabled",
+            "emulate_media_type",
+            "allow_resource_types",
+            "reject_resource_types",
+            "allow_request_pattern",
+            "reject_request_pattern",
+            "set_extra_http_headers",
+            "authenticate",
+            "cookies",
+            "add_script_tag",
+            "add_style_tag",
+        ]
+        body = {
+            field_name: options.get(field_name)
+            for field_name in fields
+            if field_name in options
+        }
+        body["limit"] = requested_limit
+        body.setdefault(
+            "render", _to_bool(self.cfg("default_render"), CRAWL_DEFAULT_RENDER)
+        )
+        body.setdefault("formats", list(CRAWL_DEFAULT_FORMATS))
+        error = _validate_crawl_body(body)
+        if error:
+            raise CloudflareParamError(error)
+
+        job_id = await self.request(
+            "POST", "crawl", params=_query_params(self, options), body=_to_cf_keys(body)
+        )
+        return {
+            "type": "crawl_start",
+            "job_id": job_id,
+            "message": "Crawl 任务已启动。",
+        }
+
+    async def crawl_status(self, job_id: Any = None, **options: Any) -> dict[str, Any]:
+        """查询 Crawl 任务状态，返回以远端结果合并的业务字典。"""
+        job_id = _safe_job_id(job_id)
+        status = str(options.get("status") or "").strip()
+        if status and status not in CRAWL_STATUSES:
+            raise CloudflareParamError(
+                f"错误：status 必须是以下值之一：{', '.join(CRAWL_STATUSES)}"
+            )
+
+        params = _query_params(self, options)
+        if status:
+            params["status"] = status
+        if _is_present(options.get("cursor")):
+            params["cursor"] = _to_int(options.get("cursor"), 0, 0)
+        if _is_present(options.get("limit")):
+            params["limit"] = _to_int(options.get("limit"), 50, 1)
+
+        result = await self.request("GET", f"crawl/{job_id}", params=params)
+        return {
+            "type": "crawl_status",
+            **(result if isinstance(result, dict) else {"result": result}),
+        }
+
+    async def crawl_cancel(self, job_id: Any) -> dict[str, Any]:
+        """取消 Crawl 任务，返回以远端结果合并的业务字典。"""
+        job_id = _safe_job_id(job_id)
+        result = await self.request("DELETE", f"crawl/{job_id}")
+        return {
+            "type": "crawl_cancel",
+            **(result if isinstance(result, dict) else {"result": result}),
+        }
+
 
 _ERROR_HINTS = {
     401: "（排查：API Token 无效或过期，请检查 api_token 配置。）",
@@ -872,6 +1028,25 @@ _ERROR_HINTS = {
 def _error_hint(status: int) -> str:
     """返回常见 HTTP 错误码的排查建议。"""
     return _ERROR_HINTS.get(status, "")
+
+
+_PAGE_EXTRA_FIELDS = {
+    "links": ["exclude_external_links", "visible_links_only"],
+    "scrape": ["elements"],
+    "json": ["prompt", "response_format", "custom_ai"],
+}
+
+_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
+
+
+def _safe_job_id(value: Any) -> str:
+    """校验 job_id 为单个安全路径段，拒绝路径/查询注入。"""
+    job_id = str(value if value is not None else "").strip()
+    if not job_id:
+        raise CloudflareParamError("错误：必须提供 job_id。")
+    if not _JOB_ID_PATTERN.fullmatch(job_id) or job_id == "." or ".." in job_id:
+        raise CloudflareParamError("错误：job_id 必须是单个安全的路径段。")
+    return job_id
 
 
 def _query_params(
@@ -960,39 +1135,6 @@ def _validate_body_enums(body: dict[str, Any]) -> str | None:
     return None
 
 
-async def _call_page_endpoint(
-    runtime: CloudflareBrowserRuntime,
-    endpoint: str,
-    result_type: str,
-    kwargs: dict[str, Any],
-    extra_fields: list[str] | None = None,
-    context: ContextWrapper[AstrAgentContext] | None = None,
-) -> str:
-    body, error = _page_body(kwargs, extra_fields)
-    if error:
-        return error
-    assert body is not None
-    try:
-        result = await runtime.request(
-            "POST",
-            endpoint,
-            params=_query_params(runtime, kwargs),
-            body=body,
-        )
-    except CloudflareAPIError as exc:
-        return str(exc)
-    return await _tool_payload(
-        {
-            "type": result_type,
-            "url": kwargs.get("url"),
-            "result": result,
-        },
-        runtime.max_output_chars,
-        runtime.data_dir,
-        context,
-    )
-
-
 @dataclass(config={"arbitrary_types_allowed": True})
 class _CloudflareTool(FunctionTool[AstrAgentContext]):
     runtime: CloudflareBrowserRuntime | None = field(default=None, repr=False)
@@ -1001,6 +1143,19 @@ class _CloudflareTool(FunctionTool[AstrAgentContext]):
         if self.runtime is None:
             raise RuntimeError("工具运行时尚未初始化。")
         return self.runtime
+
+    async def _call_runtime(
+        self, coro, context: ContextWrapper[AstrAgentContext] | None
+    ) -> ToolExecResult:
+        """执行共享业务请求：本地/远端错误以字符串返回，成功结果走 _tool_payload 桥接。"""
+        runtime = self._runtime()
+        try:
+            payload = await coro
+        except (CloudflareParamError, CloudflareAPIError) as exc:
+            return str(exc)
+        return await _tool_payload(
+            payload, runtime.max_output_chars, runtime.data_dir, context
+        )
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -1015,8 +1170,8 @@ class CloudflareMarkdownTool(_CloudflareTool):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        return await _call_page_endpoint(
-            self._runtime(), "markdown", "markdown", kwargs, context=context
+        return await self._call_runtime(
+            self._runtime().page_markdown(**kwargs), context
         )
 
 
@@ -1032,9 +1187,7 @@ class CloudflareContentTool(_CloudflareTool):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        return await _call_page_endpoint(
-            self._runtime(), "content", "content", kwargs, context=context
-        )
+        return await self._call_runtime(self._runtime().page_content(**kwargs), context)
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -1062,14 +1215,7 @@ class CloudflareLinksTool(_CloudflareTool):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        return await _call_page_endpoint(
-            self._runtime(),
-            "links",
-            "links",
-            kwargs,
-            ["exclude_external_links", "visible_links_only"],
-            context,
-        )
+        return await self._call_runtime(self._runtime().page_links(**kwargs), context)
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -1105,11 +1251,7 @@ class CloudflareScrapeTool(_CloudflareTool):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        if not _is_present(kwargs.get("elements")):
-            return "错误：elements 至少需要包含一个 selector。"
-        return await _call_page_endpoint(
-            self._runtime(), "scrape", "scrape", kwargs, ["elements"], context
-        )
+        return await self._call_runtime(self._runtime().page_scrape(**kwargs), context)
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -1166,14 +1308,7 @@ class CloudflareJsonTool(_CloudflareTool):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        return await _call_page_endpoint(
-            self._runtime(),
-            "json",
-            "json",
-            kwargs,
-            ["prompt", "response_format", "custom_ai"],
-            context,
-        )
+        return await self._call_runtime(self._runtime().page_json(**kwargs), context)
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -1299,80 +1434,7 @@ class CloudflareCrawlStartTool(_CloudflareTool):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        runtime = self._runtime()
-        if not _is_present(kwargs.get("url")):
-            return "错误：必须提供 url。"
-
-        max_crawl_limit = _to_int(
-            runtime.cfg("max_crawl_limit"), CONFIG_DEFAULTS["max_crawl_limit"], 1
-        )
-        requested_limit = _to_int(
-            kwargs.get("limit", min(CRAWL_DEFAULT_LIMIT, max_crawl_limit)),
-            CRAWL_DEFAULT_LIMIT,
-            1,
-        )
-        if requested_limit > max_crawl_limit:
-            return f"错误：limit 超过插件配置的 max_crawl_limit（{max_crawl_limit}）。"
-
-        fields = [
-            "url",
-            "limit",
-            "depth",
-            "formats",
-            "render",
-            "source",
-            "max_age",
-            "modified_since",
-            "crawl_purposes",
-            "options",
-            "json_options",
-            "goto_options",
-            "wait_for_selector",
-            "wait_for_timeout",
-            "viewport",
-            "action_timeout",
-            "best_attempt",
-            "set_javascript_enabled",
-            "emulate_media_type",
-            "allow_resource_types",
-            "reject_resource_types",
-            "allow_request_pattern",
-            "reject_request_pattern",
-            "set_extra_http_headers",
-            "authenticate",
-            "cookies",
-            "add_script_tag",
-            "add_style_tag",
-        ]
-        body = {
-            field_name: kwargs.get(field_name)
-            for field_name in fields
-            if field_name in kwargs
-        }
-        body["limit"] = requested_limit
-        body.setdefault(
-            "render", _to_bool(runtime.cfg("default_render"), CRAWL_DEFAULT_RENDER)
-        )
-        body.setdefault("formats", list(CRAWL_DEFAULT_FORMATS))
-        error = _validate_crawl_body(body)
-        if error:
-            return error
-
-        try:
-            job_id = await runtime.request(
-                "POST",
-                "crawl",
-                params=_query_params(runtime, kwargs),
-                body=_to_cf_keys(body),
-            )
-        except CloudflareAPIError as exc:
-            return str(exc)
-        return await _tool_payload(
-            {"type": "crawl_start", "job_id": job_id, "message": "Crawl 任务已启动。"},
-            runtime.max_output_chars,
-            runtime.data_dir,
-            context,
-        )
+        return await self._call_runtime(self._runtime().crawl_start(**kwargs), context)
 
 
 def _validate_crawl_body(body: dict[str, Any]) -> str | None:
@@ -1442,33 +1504,7 @@ class CloudflareCrawlStatusTool(_CloudflareTool):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        runtime = self._runtime()
-        job_id = str(kwargs.get("job_id") or "").strip()
-        if not job_id:
-            return "错误：必须提供 job_id。"
-        status = str(kwargs.get("status") or "").strip()
-        if status and status not in CRAWL_STATUSES:
-            return f"错误：status 必须是以下值之一：{', '.join(CRAWL_STATUSES)}"
-
-        params = _query_params(runtime, kwargs)
-        if status:
-            params["status"] = status
-        if _is_present(kwargs.get("cursor")):
-            params["cursor"] = _to_int(kwargs.get("cursor"), 0, 0)
-        if _is_present(kwargs.get("limit")):
-            params["limit"] = _to_int(kwargs.get("limit"), 50, 1)
-
-        try:
-            result = await runtime.request("GET", f"crawl/{job_id}", params=params)
-        except CloudflareAPIError as exc:
-            return str(exc)
-        payload = {
-            "type": "crawl_status",
-            **(result if isinstance(result, dict) else {"result": result}),
-        }
-        return await _tool_payload(
-            payload, runtime.max_output_chars, runtime.data_dir, context
-        )
+        return await self._call_runtime(self._runtime().crawl_status(**kwargs), context)
 
 
 @dataclass(config={"arbitrary_types_allowed": True})
@@ -1488,20 +1524,8 @@ class CloudflareCrawlCancelTool(_CloudflareTool):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        runtime = self._runtime()
-        job_id = str(kwargs.get("job_id") or "").strip()
-        if not job_id:
-            return "错误：必须提供 job_id。"
-        try:
-            result = await runtime.request("DELETE", f"crawl/{job_id}")
-        except CloudflareAPIError as exc:
-            return str(exc)
-        payload = {
-            "type": "crawl_cancel",
-            **(result if isinstance(result, dict) else {"result": result}),
-        }
-        return await _tool_payload(
-            payload, runtime.max_output_chars, runtime.data_dir, context
+        return await self._call_runtime(
+            self._runtime().crawl_cancel(kwargs.get("job_id")), context
         )
 
 
@@ -1517,9 +1541,12 @@ TOOL_CLASSES = (
 )
 
 
-def build_tools(config: dict[str, Any]) -> tuple[list[FunctionTool], list[str]]:
-    """创建本插件的全部 LLM Tool。"""
-    runtime = CloudflareBrowserRuntime(config, get_plugin_data_dir())
+def build_tools(
+    config: dict[str, Any], runtime: CloudflareBrowserRuntime | None = None
+) -> tuple[list[FunctionTool], list[str]]:
+    """创建本插件的全部 LLM Tool；传入 runtime 时与 Main、SDK 共用同一实例。"""
+    if runtime is None:
+        runtime = CloudflareBrowserRuntime(config, get_plugin_data_dir())
     tools: list[FunctionTool] = []
     names: list[str] = []
     for tool_cls in TOOL_CLASSES:

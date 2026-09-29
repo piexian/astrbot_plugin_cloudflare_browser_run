@@ -94,6 +94,56 @@ Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://d
 单页抓取工具（markdown/content/links/scrape/json）默认使用 headless Chrome 执行 JavaScript 后再提取内容，无需额外参数。
 
 Crawl 工具默认 `render=false`（快速 HTML 抓取，不执行 JS，不计 browser hours）。需要抓取 JS 渲染页面时传 `render: true`，但会消耗 browser hours 且更慢。可通过配置项 `default_render` 调整默认值。
+
+## SDK 服务接入（v1）
+
+其他插件可通过 `get_service(api_version=1)` 获取公开服务门面，与 LLM Tool 共用同一份配置和 Runtime：
+
+```python
+def get_browser_service(context):
+    meta = context.get_registered_star("astrbot_plugin_cloudflare_browser_run")
+    if meta is None:
+        raise RuntimeError("注册表中未发现浏览器插件，请检查安装与加载状态")
+    if not meta.activated:
+        raise RuntimeError("浏览器插件已停用")
+    if meta.star_cls is None:
+        raise RuntimeError("浏览器插件尚无可调用实例")
+    getter = getattr(meta.star_cls, "get_service", None)
+    if not callable(getter):
+        raise RuntimeError("浏览器插件版本不支持 SDK，请升级")
+    return getter(api_version=1)
+
+service = get_browser_service(context)
+
+status = service.get_status()
+# 同步本地快照：{api_version, instance_id, state, ready, reason}
+# state 为 initializing / ready / unavailable / closing / closed；
+# 缺 account_id / api_token 时为 unavailable（reason=not_configured）
+status = await service.wait_ready(timeout=10)
+# 超时抛 TimeoutError；服务关闭后抛 RuntimeError（code=service_closed）
+
+result = await service.fetch("https://example.com")            # markdown 的便捷入口
+result = await service.markdown(url="https://example.com", cache_ttl=60)
+result = await service.content(url="https://example.com")
+result = await service.links(url="https://example.com", visible_links_only=True)
+result = await service.scrape(url="https://example.com", elements=[{"selector": "h1"}])
+result = await service.json(url="https://example.com", prompt="提取标题")
+job = await service.crawl_start("https://example.com", limit=20)
+detail = await service.crawl_status(job["job_id"])
+await service.crawl_cancel(job["job_id"])
+```
+
+说明：
+
+- 页面方法返回含 `type`、`url`、`result` 的字典；`crawl_start` 返回 `job_id`，查询和取消结果保留远端业务字段。
+- SDK 返回完整结果：不截断、不落结果文件、不上传沙箱；限长与文件桥接仅是旧 LLM Tool 的展示行为。
+- `service.capabilities()` 返回 `{"api_version": 1, "features": ["web.fetch", "browser.markdown", "browser.content", "browser.links", "browser.scrape", "browser.json", "browser.crawl"]}`。
+- 版本只接受整数 `1`（不接受布尔值），不兼容时错误码为 `unsupported_version`；初始化未完成或缺凭据时，业务调用错误码为 `not_ready`，不会请求远端。
+- 不在插件 `initialize()` 中等待依赖就绪；以上等待和业务调用用于事件处理或后台业务协程。
+- 参数错误抛 `CloudflareParamError`（ValueError 子类，消息与工具一致）；Cloudflare API 错误抛 `CloudflareAPIError`（token / headers / cookies 等已脱敏）。
+- 插件卸载后旧服务引用永久失效：业务调用抛 `RuntimeError`（code=service_closed），`get_status()` 仍可查询；重载后新服务的 `instance_id` 不同。
+- crawl `job_id` 必须是单个安全路径段（自动拒绝路径/查询注入）；爬取额度 `max_crawl_limit`、缓存 TTL 与枚举校验同样适用于 SDK。
+
 ## 示例
 
 ### 抓取 Markdown
@@ -205,10 +255,12 @@ Crawl 工具常用可选参数：
 ```text
 astrbot_plugin_cloudflare_browser_run/
 ├── main.py
+├── plugin_service.py
 ├── logo.png
 ├── tools/
 │   ├── __init__.py
 │   └── cloudflare_browser.py
+├── tests/
 ├── metadata.yaml
 ├── _conf_schema.json
 └── README.md
