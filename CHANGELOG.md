@@ -1,5 +1,16 @@
 # 更新日志
 
+## 未发布
+
+- 新增 SDK v1 公开服务门面：其他插件可通过 `main.get_service(api_version=1)` 取得 `CloudflareBrowserService`，
+  公开 `fetch/markdown/content/links/scrape/json/crawl_start/crawl_status/crawl_cancel` 具名方法；
+  SDK 返回完整结果（不截断、不落结果文件、不上传沙箱），限长与文件桥接仅保留在旧 LLM Tool 展示层。
+- 请求构造/校验/执行提取为 `CloudflareBrowserRuntime` 具名共享业务入口，Main、所有 Tool 与 SDK 共用同一 Runtime 实例；
+  `build_tools` 新增向后兼容的可选 `runtime` 参数。
+- 新增 `initialize()` 状态节点与状态查询：`get_status()/capabilities()/wait_ready()` 零副作用（不新建 Runtime、不读写文件、不联网）；
+  缺 `account_id`/`api_token` 时状态为 `unavailable`（not_configured）；卸载后旧服务拒绝新调用（service_closed）。
+- crawl `job_id` 现校验为单个安全路径段，拒绝路径/查询注入；原有八类 Cloudflare API、限长桥接与沙盒同步行为不变。
+
 ## v1.1.2
 
 - 修复兜底响应可能超过 `max_output_chars`：preview 改为按序列化后元数据预留空间动态截断，兜底 JSON 整体不超限。
