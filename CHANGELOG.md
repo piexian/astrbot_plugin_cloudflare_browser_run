@@ -1,6 +1,6 @@
 # 更新日志
 
-## 未发布
+## v1.1.3
 
 - 新增 SDK v1 公开服务门面：其他插件可通过 `main.get_service(api_version=1)` 取得 `CloudflareBrowserService`，
   公开 `fetch/markdown/content/links/scrape/json/crawl_start/crawl_status/crawl_cancel` 具名方法；
