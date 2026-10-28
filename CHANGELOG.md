@@ -1,6 +1,6 @@
 # 更新日志
 
-## Unreleased
+## v1.2.0
 
 - LLM 工具合并为 `cf_browser_fetch` 与 `cf_browser_crawl`，新增可访问性树、Snapshot 和 `contentUse`。
 - 修复 Local 结果权限与长 JSON 难分段问题，增加可读内容文件、保留时间和数量上限。
