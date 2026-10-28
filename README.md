@@ -79,17 +79,12 @@ LLM 工具中的截图一律保存为图片文件并返回路径，不直接返�
 
 ## 工具
 
-| 工具名 | 参数 | 用途 |
-|--------|------|------|
-| `cf_browser_fetch` | `mode=markdown/content/links/scrape/json/accessibility_tree/snapshot` | 单页渲染、读取与结构化提取 |
-| `cf_browser_crawl` | `action=start/status/cancel` | 启动、查询和取消 Crawl |
+| 工具 | 用途 |
+|------|------|
+| `cf_browser_fetch` | 单页渲染、读取与结构化提取 |
+| `cf_browser_crawl` | 启动、查询和取消异步 Crawl |
 
-`markdown` 是默认读取模式；`snapshot` 默认返回 Markdown 和可访问性树。LLM 错误返回 `error.code`、`error.message` 和 `retryable`；SDK 仍抛出原有异常类型。
-### JavaScript 渲染说明
-
-`cf_browser_fetch` 默认使用 headless Chrome 执行 JavaScript 后再提取内容。
-
-`cf_browser_crawl(action=start)` 默认 `render=false`。需要 JS 渲染时传 `render: true`，会消耗 browser hours；可通过 `default_render` 调整默认值。
+默认读取 Markdown；Snapshot 默认返回 Markdown 和可访问性树。Fetch 默认执行 JavaScript，Crawl 默认 `render=false`。
 
 ## SDK 服务接入（v1）
 
@@ -189,26 +184,6 @@ await service.crawl_cancel(job["job_id"])
 ```
 
 返回 `job_id` 和 `next_action`。运行中每 5 秒用 `cf_browser_crawl(action=status, limit=1, cache_ttl=0)` 轮询，完成后再取完整记录。
-
-## 可选抓取参数
-
-`cf_browser_fetch` 常用参数：`cache_ttl`、`goto_options`、`wait_for_selector`、`wait_for_timeout`、`set_javascript_enabled`、`allow_resource_types`、`reject_resource_types`、`best_attempt`。
-
-模式专属参数：`elements`（scrape）、`prompt`/`response_format`/`custom_ai`（json）、`exclude_external_links`/`visible_links_only`（links）、`root`/`interesting_only`（可访问性树）、`formats`（snapshot）。
-
-`cf_browser_crawl(action=start)` 支持 `limit`、`depth`、`formats`、`render`、`source`、`max_age`、`modified_since`、`crawl_purposes`、`content_use`、`options`、`json_options` 和浏览器等待参数。
-
-高级参数放入 `advanced_options`：`viewport`、`action_timeout`、`user_agent`、`emulate_media_type`、请求匹配规则、headers、认证、cookies 及 script/style 注入。Crawl 的这些参数仅在 `render=true` 时生效。
-
-注意：
-
-- `allow_request_pattern` 和 `reject_request_pattern` 不能同时使用。
-- `allow_resource_types` 和 `reject_resource_types` 不能同时使用。
-- `modified_since` 只用于 Crawl，必须是最近一年内且不晚于当前时间的 Unix 秒级时间戳。
-- `url` 和 `html` 必须且只能提供一个。
-- Snapshot 的 `formats` 至少需要两种格式；只需一种时使用对应单页 `mode`。
-- JSON 提取至少需要 `prompt` 或 `response_format`；Crawl 使用 `json` 格式时必须提供 `json_options`。
-- 未识别参数、越界数字和不支持的枚举会在本地拒绝，不发送请求。
 
 ## 敏感信息
 
