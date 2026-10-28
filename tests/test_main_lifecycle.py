@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from astrbot_plugin_cloudflare_browser_run.tools.cloudflare_browser import TOOL_NAMES
+from astrbot_plugin_cloudflare_browser_run.tools.cloudflare_browser import (
+    LEGACY_TOOL_NAMES,
+    TOOL_NAMES,
+)
 
 
 def test_main_registers_all_tools(make_plugin):
@@ -18,8 +21,9 @@ async def test_terminate_removes_tools_and_closes_service(make_plugin):
     await plugin.terminate()
     # 初始化注册前与 terminate 时各执行一次卸载，共两轮
     removed = plugin.context.tool_manager.removed
-    assert len(removed) == 2 * len(TOOL_NAMES)
-    assert removed[-len(TOOL_NAMES) :] == list(TOOL_NAMES)
+    removable_names = [*TOOL_NAMES, *LEGACY_TOOL_NAMES]
+    assert len(removed) == 2 * len(removable_names)
+    assert removed[-len(removable_names) :] == removable_names
     assert service.get_status()["state"] == "closed"
 
 

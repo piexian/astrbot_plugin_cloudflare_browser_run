@@ -76,6 +76,8 @@ async def test_enum_values_rejected(make_runtime, fake_http):
     with pytest.raises(CloudflareParamError):
         await runtime.crawl_start("https://example.com", crawl_purposes=["spam"])
     with pytest.raises(CloudflareParamError):
+        await runtime.crawl_start("https://example.com", content_use="everything")
+    with pytest.raises(CloudflareParamError):
         await runtime.crawl_status("job-ok", status="flying")
     with pytest.raises(CloudflareParamError):
         await runtime.page_markdown(
@@ -137,4 +139,68 @@ async def test_missing_credentials_rejected_before_http(make_runtime, fake_http)
 
     with pytest.raises(CloudflareAPIError):
         await runtime.crawl_start("https://example.com")
+    assert fake_http.calls == []
+
+
+async def test_page_rejects_both_url_and_html(make_runtime, fake_http):
+    runtime = make_runtime()
+    with pytest.raises(CloudflareParamError, match="只能提供其中一个"):
+        await runtime.page_markdown(
+            url="https://example.com", html="<h1>duplicate</h1>"
+        )
+    assert fake_http.calls == []
+
+
+async def test_json_requires_prompt_or_response_format(make_runtime, fake_http):
+    runtime = make_runtime()
+    with pytest.raises(CloudflareParamError, match="prompt 或 response_format"):
+        await runtime.page_json(url="https://example.com")
+    assert fake_http.calls == []
+
+
+async def test_crawl_json_requires_json_options(make_runtime, fake_http):
+    runtime = make_runtime()
+    with pytest.raises(CloudflareParamError, match="json_options"):
+        await runtime.crawl_start("https://example.com", formats=["json"])
+    assert fake_http.calls == []
+
+
+async def test_unknown_parameters_rejected_without_http(make_runtime, fake_http):
+    runtime = make_runtime()
+    with pytest.raises(CloudflareParamError, match="unknown_option"):
+        await runtime.page_markdown(url="https://example.com", unknown_option=True)
+    with pytest.raises(CloudflareParamError, match="unknown_option"):
+        await runtime.crawl_start("https://example.com", unknown_option=True)
+    with pytest.raises(CloudflareParamError, match="unknown_option"):
+        await runtime.crawl_status("job-1", unknown_option=True)
+    assert fake_http.calls == []
+
+
+async def test_browser_timeout_budget_rejected_before_http(make_runtime, fake_http):
+    runtime = make_runtime(
+        make_config(request_settings={"timeout_seconds": 1, "max_crawl_limit": 100})
+    )
+    with pytest.raises(CloudflareParamError, match="timeout_seconds"):
+        await runtime.page_markdown(
+            url="https://example.com",
+            goto_options={"timeout": 600},
+            wait_for_timeout=500,
+            action_timeout=100,
+        )
+    with pytest.raises(CloudflareParamError, match="timeout_seconds"):
+        await runtime.crawl_start(
+            "https://example.com", render=True, wait_for_timeout=1500
+        )
+    assert fake_http.calls == []
+
+
+@pytest.mark.parametrize(
+    "field,value", [("depth", 0), ("max_age", 604801), ("max_age", 1.5)]
+)
+async def test_crawl_numeric_bounds_rejected_without_http(
+    make_runtime, fake_http, field, value
+):
+    runtime = make_runtime()
+    with pytest.raises(CloudflareParamError, match=field):
+        await runtime.crawl_start("https://example.com", **{field: value})
     assert fake_http.calls == []

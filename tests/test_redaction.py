@@ -30,10 +30,11 @@ async def test_http_error_redacts_api_token(make_runtime, fake_http):
 
 async def test_non_json_error_redacts_bearer_scheme(make_runtime, fake_http):
     runtime = make_runtime()
-    fake_http.enqueue(
-        500,
-        "gateway error: Authorization: Bearer tok-secret-123 leaked",
-    )
+    for _ in range(3):
+        fake_http.enqueue(
+            500,
+            "gateway error: Authorization: Bearer tok-secret-123 leaked",
+        )
     with pytest.raises(CloudflareAPIError) as exc_info:
         await runtime.page_markdown(url="https://example.com")
     message = str(exc_info.value)

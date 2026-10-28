@@ -90,6 +90,22 @@ async def test_json_request_keeps_snake_keys(make_runtime, fake_http):
     assert body["custom_ai"][0]["authorization"] == "sk-custom"
 
 
+async def test_accessibility_tree_and_snapshot_requests(make_runtime, fake_http):
+    runtime = make_runtime()
+    fake_http.enqueue(200, {"result": {"accessibilityTree": {"role": "RootWebArea"}}})
+    await runtime.page_accessibility_tree(url="https://example.com")
+    tree_call = fake_http.calls[0]
+    assert tree_call["url"].endswith("/browser-rendering/accessibilityTree")
+    assert tree_call["json"]["interestingOnly"] is True
+
+    fake_http.enqueue(200, {"result": {"markdown": "# ok"}})
+    await runtime.page_snapshot(url="https://example.com")
+    snapshot_call = fake_http.calls[1]
+    assert snapshot_call["url"].endswith("/browser-rendering/snapshot")
+    assert snapshot_call["json"]["formats"] == ["markdown", "accessibilityTree"]
+    assert snapshot_call["json"]["interestingOnly"] is True
+
+
 async def test_crawl_start_defaults_and_payload(make_runtime, fake_http):
     runtime = make_runtime()
     fake_http.enqueue(200, {"success": True, "result": JOB_ID})
@@ -118,17 +134,20 @@ async def test_crawl_start_honors_options_and_small_cap(make_runtime, fake_http)
     fake_http.enqueue(200, {"result": JOB_ID})
     await runtime.crawl_start(
         "https://example.com",
-        depth=2,
+        depth="2",
         source="sitemaps",
         crawl_purposes=["search"],
         modified_since=None,
+        content_use="reference",
     )
     body = fake_http.calls[0]["json"]
     # 默认 limit 取 min(CRAWL_DEFAULT_LIMIT, max_crawl_limit)
     assert body["limit"] == 5
+    assert body["depth"] == 2
     assert body["render"] is True
     assert body["source"] == "sitemaps"
     assert body["crawlPurposes"] == ["search"]
+    assert body["contentUse"] == "reference"
     # 显式传入的 None 值不进入请求体
     assert "modifiedSince" not in body
 
@@ -179,11 +198,11 @@ async def test_crawl_cancel_request_construction(make_runtime, fake_http):
     assert payload == {"type": "crawl_cancel", "id": JOB_ID}
 
 
-async def test_cache_ttl_clamped_to_allowed_range(make_runtime, fake_http):
+async def test_cache_ttl_out_of_range_rejected_without_http(make_runtime, fake_http):
     runtime = make_runtime()
-    fake_http.enqueue(200, {"result": {}})
-    await runtime.page_markdown(url="https://example.com", cache_ttl=999999)
-    assert fake_http.calls[0]["params"] == {"cacheTTL": 86400}
+    with pytest.raises(CloudflareParamError, match="cache_ttl"):
+        await runtime.page_markdown(url="https://example.com", cache_ttl=999999)
+    assert fake_http.calls == []
 
 
 async def test_api_error_raises_cloudflare_api_error(make_runtime, fake_http):
@@ -199,3 +218,51 @@ async def test_success_false_raises_api_error(make_runtime, fake_http):
     fake_http.enqueue(200, {"success": False, "errors": [{"message": "nope"}]})
     with pytest.raises(CloudflareAPIError):
         await runtime.page_markdown(url="https://example.com")
+
+
+async def test_browser_usage_metadata_is_returned(make_runtime, fake_http):
+    runtime = make_runtime()
+    fake_http.enqueue(
+        200,
+        {"result": {"markdown": "# ok"}},
+        headers={"X-Browser-Ms-Used": "123"},
+    )
+    payload = await runtime.page_markdown(url="https://example.com")
+    assert payload["browser_ms_used"] == 123
+
+
+async def test_safe_request_retries_with_retry_after(make_runtime, fake_http):
+    runtime = make_runtime()
+    fake_http.enqueue(
+        429,
+        {"errors": [{"message": "rate limited"}]},
+        headers={"Retry-After": "0"},
+    )
+    fake_http.enqueue(200, {"result": {"markdown": "# recovered"}})
+    payload = await runtime.page_markdown(url="https://example.com")
+    assert payload["result"]["markdown"] == "# recovered"
+    assert len(fake_http.calls) == 2
+
+
+async def test_crawl_start_is_not_retried(make_runtime, fake_http):
+    runtime = make_runtime()
+    fake_http.enqueue(
+        429,
+        {"errors": [{"message": "rate limited"}]},
+        headers={"Retry-After": "0"},
+    )
+    with pytest.raises(CloudflareAPIError):
+        await runtime.crawl_start("https://example.com")
+    assert len(fake_http.calls) == 1
+
+
+async def test_long_retry_after_is_not_scheduled(make_runtime, fake_http):
+    runtime = make_runtime()
+    fake_http.enqueue(
+        429,
+        {"errors": [{"message": "daily limit"}]},
+        headers={"Retry-After": "3600"},
+    )
+    with pytest.raises(CloudflareAPIError):
+        await runtime.page_markdown(url="https://example.com")
+    assert len(fake_http.calls) == 1

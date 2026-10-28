@@ -62,9 +62,9 @@ async def test_shared_runtime_reflects_same_config(make_plugin, fake_http):
     fake_http.enqueue(200, {"result": "job-1"})
     await service.crawl_start("https://example.com")
     fake_http.enqueue(200, {"result": "job-2"})
-    crawl_tool = plugin.context.added_tools[5]
-    assert crawl_tool.name == "cf_browser_crawl_start"
-    await crawl_tool.call(None, url="https://example.com")
+    crawl_tool = plugin.context.added_tools[1]
+    assert crawl_tool.name == "cf_browser_crawl"
+    await crawl_tool.call(None, action="start", url="https://example.com")
     # 两者默认 limit 都是 min(10, max_crawl_limit=100) = 10
     assert fake_http.calls[0]["json"]["limit"] == 10
     assert fake_http.calls[1]["json"]["limit"] == 10

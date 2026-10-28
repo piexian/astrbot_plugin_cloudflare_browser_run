@@ -33,6 +33,8 @@ class CloudflareBrowserService:
         "browser.links",
         "browser.scrape",
         "browser.json",
+        "browser.accessibility_tree",
+        "browser.snapshot",
         "browser.crawl",
     )
 
@@ -149,6 +151,25 @@ class CloudflareBrowserService:
         self, *, url: str | None = None, html: str | None = None, **options: Any
     ) -> dict[str, Any]:
         return await self._runtime().page_json(url=url, html=html, **options)
+
+    async def accessibility_tree(
+        self, *, url: str | None = None, html: str | None = None, **options: Any
+    ) -> dict[str, Any]:
+        return await self._runtime().page_accessibility_tree(
+            url=url, html=html, **options
+        )
+
+    async def snapshot(
+        self,
+        *,
+        url: str | None = None,
+        html: str | None = None,
+        formats: Any = None,
+        **options: Any,
+    ) -> dict[str, Any]:
+        return await self._runtime().page_snapshot(
+            url=url, html=html, formats=formats, **options
+        )
 
     async def crawl_start(self, url: str, **options: Any) -> dict[str, Any]:
         """启动异步 Crawl 任务；job_id 是调用方保存的远端句柄。"""

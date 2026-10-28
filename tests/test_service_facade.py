@@ -18,6 +18,8 @@ FEATURES = [
     "browser.links",
     "browser.scrape",
     "browser.json",
+    "browser.accessibility_tree",
+    "browser.snapshot",
     "browser.crawl",
 ]
 
@@ -137,6 +139,8 @@ async def test_terminate_rejects_new_business_calls(make_plugin, fake_http):
             url="https://example.com", elements=[{"selector": "h1"}]
         ),
         lambda: service.json(url="https://example.com"),
+        lambda: service.accessibility_tree(url="https://example.com"),
+        lambda: service.snapshot(url="https://example.com"),
         lambda: service.crawl_start("https://example.com"),
         lambda: service.crawl_status("job-ok"),
         lambda: service.crawl_cancel("job-ok"),
