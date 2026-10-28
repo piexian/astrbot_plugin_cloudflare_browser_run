@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -16,10 +17,18 @@ from astrbot_plugin_cloudflare_browser_run.tools.cloudflare_browser import (
 from conftest import make_config
 
 BIG_MARKDOWN = "# Example\n\n" + "x" * 40000
+SCREENSHOT_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
 
 def _enqueue_markdown(fake_http, content):
     fake_http.enqueue(200, {"success": True, "result": {"markdown": content}})
+
+
+def _enqueue_snapshot(fake_http, markdown="# Example"):
+    fake_http.enqueue(
+        200,
+        {"result": {"markdown": markdown, "screenshot": SCREENSHOT_BASE64}},
+    )
 
 
 async def test_tool_long_result_bridges_to_file(make_runtime, fake_http):
@@ -52,6 +61,83 @@ async def test_sdk_long_result_stays_complete_without_file(make_runtime, fake_ht
 
     results_dir = runtime.data_dir / "cloudflare_browser_results"
     assert not results_dir.exists() or not list(results_dir.iterdir())
+
+
+async def test_screenshot_is_file_path_not_base64(make_runtime, fake_http):
+    runtime = make_runtime()
+    _enqueue_snapshot(fake_http)
+    tool = CloudflareFetchTool(runtime=runtime)
+    out = await tool.call(
+        None,
+        mode="snapshot",
+        url="https://example.com",
+        formats=["markdown", "screenshot"],
+    )
+    data = json.loads(out)
+    reference = data["result"]["screenshot"]
+    path = Path(reference["file_path"])
+    assert SCREENSHOT_BASE64 not in out
+    assert path.suffix == ".png"
+    assert path.read_bytes() == base64.b64decode(SCREENSHOT_BASE64)
+    assert reference["mime_type"] == "image/png"
+    assert reference["file_size_bytes"] == path.stat().st_size
+
+    service = CloudflareBrowserService(runtime.config, lambda: runtime)
+    service.mark_initialized()
+    _enqueue_snapshot(fake_http)
+    sdk_result = await service.snapshot(
+        url="https://example.com", formats=["markdown", "screenshot"]
+    )
+    assert sdk_result["result"]["screenshot"] == SCREENSHOT_BASE64
+
+
+async def test_large_snapshot_keeps_image_and_result_in_one_group(
+    make_runtime, fake_http
+):
+    runtime = make_runtime(
+        make_config(
+            output_settings={
+                "max_output_chars": 12000,
+                "result_retention_hours": 24,
+                "max_stored_results": 1,
+            }
+        )
+    )
+    _enqueue_snapshot(fake_http, BIG_MARKDOWN)
+    tool = CloudflareFetchTool(runtime=runtime)
+    out = await tool.call(
+        None,
+        mode="snapshot",
+        url="https://example.com",
+        formats=["markdown", "screenshot"],
+    )
+    data = json.loads(out)
+    image_path = Path(data["images"][0]["file_path"])
+    assert image_path.exists()
+    assert data["saved_to_file"] is True
+    report = Path(data["file_path"]).read_text(encoding="utf-8")
+    assert str(image_path) in report
+    raw_path = Path(data["raw_json_file_path"])
+    raw_text = raw_path.read_text(encoding="utf-8")
+    assert SCREENSHOT_BASE64 not in raw_text
+    assert json.loads(raw_text)["result"]["screenshot"]["file_path"] == str(image_path)
+    assert image_path.stem == raw_path.stem
+
+
+async def test_invalid_screenshot_never_falls_back_to_base64(make_runtime, fake_http):
+    runtime = make_runtime()
+    fake_http.enqueue(200, {"result": {"screenshot": "not-base64"}})
+    tool = CloudflareFetchTool(runtime=runtime)
+    out = await tool.call(
+        None,
+        mode="snapshot",
+        url="https://example.com",
+        formats=["markdown", "screenshot"],
+    )
+    data = json.loads(out)
+    assert data["error"]["code"] == "image_storage_error"
+    assert data["retryable"] is False
+    assert "not-base64" not in out
 
 
 class _EventStub:
@@ -261,3 +347,38 @@ async def test_result_cleanup_preserves_unrelated_files(make_runtime, fake_http)
     assert not old_json.exists()
     assert not old_markdown.exists()
     assert unrelated.read_text() == "keep"
+
+
+async def test_sandbox_screenshot_returns_sandbox_path(
+    make_runtime, fake_http, monkeypatch
+):
+    import astrbot_plugin_cloudflare_browser_run.tools.cloudflare_browser as cf
+
+    uploads: list[str] = []
+
+    async def fake_booter(context, umo):
+        class _Booter:
+            async def upload_file(self, path, name):
+                uploads.append(name)
+                return {"success": True, "file_path": f"/sandbox/{name}"}
+
+        return _Booter()
+
+    monkeypatch.setattr(cf, "get_booter", fake_booter)
+    runtime = make_runtime()
+    _enqueue_snapshot(fake_http)
+    tool = CloudflareFetchTool(runtime=runtime)
+    out = await tool.call(
+        _ContextStub("sandbox"),
+        mode="snapshot",
+        url="https://example.com",
+        formats=["markdown", "screenshot"],
+    )
+    data = json.loads(out)
+    reference = data["result"]["screenshot"]
+    assert reference["file_path"] == f"/sandbox/{uploads[0]}"
+    assert reference["sandbox_synced"] is True
+    assert Path(reference["host_file_path"]).exists()
+    assert uploads[0].endswith(".png")
+    assert len(uploads) == 1
+    assert SCREENSHOT_BASE64 not in out

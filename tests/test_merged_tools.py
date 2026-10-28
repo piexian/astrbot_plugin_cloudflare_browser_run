@@ -23,6 +23,7 @@ def test_merged_tool_schemas_are_compact_and_provider_compatible(make_runtime):
 
     fetch_properties = tools[0].parameters["properties"]
     assert "advanced_options" in fetch_properties
+    assert fetch_properties["formats"]["minItems"] == 2
     assert "cookies" not in fetch_properties
     assert "authenticate" not in fetch_properties
     schema_chars = sum(

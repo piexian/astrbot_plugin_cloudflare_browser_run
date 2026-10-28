@@ -72,6 +72,7 @@ Browser Run 用量可在 [Cloudflare Dashboard 的 Browser Run 页面](https://d
 超限返回包含 `file_path`、文件大小和 `suggested_tools`。Markdown 与 Crawl 使用可按行读取的内容文件，`raw_json_file_path` 保留原始 JSON。
 
 Local 运行时优先保存到当前会话 `workspace/cloudflare_browser_results/`；沙盒运行时自动上传可读内容文件并返回沙盒路径。上传失败或未启用文件工具时附带 `preview` 兜底。
+LLM 工具中的截图一律保存为图片文件并返回路径，不直接返回 Base64；SDK 保留 Cloudflare 原始响应。
 每次写入前按保留时间和组数清理最旧结果，只处理插件生成的文件。
 
 工具启停使用 AstrBot 自带的 LLM Tool 管理功能控制。插件初始化时会注册全部工具。
@@ -205,6 +206,7 @@ await service.crawl_cancel(job["job_id"])
 - `allow_resource_types` 和 `reject_resource_types` 不能同时使用。
 - `modified_since` 只用于 Crawl，必须是最近一年内且不晚于当前时间的 Unix 秒级时间戳。
 - `url` 和 `html` 必须且只能提供一个。
+- Snapshot 的 `formats` 至少需要两种格式；只需一种时使用对应单页 `mode`。
 - JSON 提取至少需要 `prompt` 或 `response_format`；Crawl 使用 `json` 格式时必须提供 `json_options`。
 - 未识别参数、越界数字和不支持的枚举会在本地拒绝，不发送请求。
 

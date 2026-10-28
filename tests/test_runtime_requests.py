@@ -106,6 +106,13 @@ async def test_accessibility_tree_and_snapshot_requests(make_runtime, fake_http)
     assert snapshot_call["json"]["interestingOnly"] is True
 
 
+async def test_snapshot_single_format_rejected_without_http(make_runtime, fake_http):
+    runtime = make_runtime()
+    with pytest.raises(CloudflareParamError, match="至少需要两种格式"):
+        await runtime.page_snapshot(url="https://example.com", formats=["markdown"])
+    assert fake_http.calls == []
+
+
 async def test_crawl_start_defaults_and_payload(make_runtime, fake_http):
     runtime = make_runtime()
     fake_http.enqueue(200, {"success": True, "result": JOB_ID})

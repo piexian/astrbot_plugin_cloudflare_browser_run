@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import re
 import time
@@ -455,14 +457,27 @@ def _readable_payload(payload: dict[str, Any]) -> tuple[str, str]:
                 if isinstance(content, str)
                 else json.dumps(content, ensure_ascii=False, default=str, indent=2)
             )
-        if _is_present(result.get("screenshot")):
+        screenshot = result.get("screenshot")
+        if isinstance(screenshot, dict) and screenshot.get("file_path"):
+            lines.extend(["", "## screenshot", ""])
+            for key in (
+                "file_path",
+                "host_file_path",
+                "mime_type",
+                "file_size_bytes",
+                "sandbox_synced",
+                "error",
+            ):
+                if key in screenshot:
+                    lines.append(f"- {key}: {screenshot[key]}")
+        elif _is_present(screenshot):
             lines.extend(["", "## screenshot", "", "截图见 raw_json_file_path。"])
         return ".md", "\n".join(lines)
     return ".json", json.dumps(payload, ensure_ascii=False, default=str, indent=2)
 
 
 _RESULT_FILE_PATTERN = re.compile(
-    r"^(?P<stem>[A-Za-z0-9_.-]+_\d{8}_\d{6}_\d{6}_[0-9a-f]{8})\.(json|md|html)$"
+    r"^(?P<stem>[A-Za-z0-9_.-]+_\d{8}_\d{6}_\d{6}_[0-9a-f]{8})\.(json|md|html|png|jpe?g|webp)$"
 )
 
 
@@ -513,11 +528,14 @@ def _write_large_payload(
     data_dir: Path,
     retention_hours: int,
     max_stored_results: int,
+    stem: str | None = None,
+    cleanup: bool = True,
 ) -> tuple[Path, int, Path | None]:
     results_dir = data_dir / RESULTS_DIR_NAME
     results_dir.mkdir(parents=True, exist_ok=True)
-    _cleanup_result_files(results_dir, retention_hours, max_stored_results)
-    stem = _result_file_stem(payload)
+    if cleanup:
+        _cleanup_result_files(results_dir, retention_hours, max_stored_results)
+    stem = stem or _result_file_stem(payload)
     raw_json = json.dumps(payload, ensure_ascii=False, default=str, indent=2)
     suffix, readable = _readable_payload(payload)
     if suffix == ".json":
@@ -594,6 +612,72 @@ def _file_suggested_tools(path: str) -> list[dict[str, Any]]:
     ]
 
 
+def _decode_screenshot(value: str) -> tuple[bytes, str, str]:
+    """解码 Cloudflare 截图并校验实际图片格式。"""
+    encoded = value.strip()
+    if encoded.startswith("data:"):
+        header, separator, encoded = encoded.partition(",")
+        if not separator or ";base64" not in header.lower():
+            raise ValueError("截图 data URL 必须使用 Base64 编码")
+    encoded = "".join(encoded.split())
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("截图不是合法的 Base64 数据") from exc
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return content, ".png", "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return content, ".jpg", "image/jpeg"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return content, ".webp", "image/webp"
+    raise ValueError("截图格式不受支持，仅支持 PNG、JPEG 或 WebP")
+
+
+async def _materialize_screenshot(
+    payload: dict[str, Any],
+    data_dir: Path,
+    context: ContextWrapper[AstrAgentContext] | None,
+    runtime: str,
+    retention_hours: int,
+    max_stored_results: int,
+    stem: str,
+) -> tuple[dict[str, Any], bool]:
+    """将 LLM 结果中的 Base64 截图替换为文件引用。"""
+    result = payload.get("result")
+    screenshot = result.get("screenshot") if isinstance(result, dict) else None
+    if not isinstance(screenshot, str) or not screenshot:
+        return payload, False
+
+    content, suffix, mime_type = _decode_screenshot(screenshot)
+    results_dir = data_dir / RESULTS_DIR_NAME
+    results_dir.mkdir(parents=True, exist_ok=True)
+    _cleanup_result_files(results_dir, retention_hours, max_stored_results)
+    path = (results_dir / f"{stem}{suffix}").resolve(strict=False)
+    path.write_bytes(content)
+    reference: dict[str, Any] = {
+        "saved_to_file": True,
+        "file_path": str(path),
+        "file_size_bytes": len(content),
+        "mime_type": mime_type,
+    }
+    if runtime == "sandbox":
+        reference["host_file_path"] = str(path)
+        try:
+            sandbox_path = await _upload_result_to_sandbox(context, path)
+        except Exception as exc:
+            reference["sandbox_synced"] = False
+            reference["error"] = f"图片已落盘，但同步沙盒失败：{str(exc)[:200]}"
+        else:
+            reference["file_path"] = sandbox_path
+            reference["sandbox_synced"] = True
+
+    prepared = dict(payload)
+    prepared_result = dict(result)
+    prepared_result["screenshot"] = reference
+    prepared["result"] = prepared_result
+    return prepared, True
+
+
 async def _tool_payload(
     payload: dict[str, Any],
     max_chars: int,
@@ -603,19 +687,46 @@ async def _tool_payload(
     max_stored_results: int = 50,
 ) -> str:
     max_chars = max(1000, int(max_chars or CONFIG_DEFAULTS["max_output_chars"]))
-    dumped = _json_dumps(payload)
-    if len(dumped) <= max_chars:
-        return dumped
-
     runtime = _computer_use_runtime(context) if context is not None else "local"
     result_data_dir = (
         await _result_data_dir(context, data_dir)
         if context is not None and runtime == "local"
         else data_dir
     )
+    stem = _result_file_stem(payload)
+    try:
+        payload, screenshot_stored = await _materialize_screenshot(
+            payload,
+            result_data_dir,
+            context,
+            runtime,
+            retention_hours,
+            max_stored_results,
+            stem,
+        )
+    except Exception as exc:
+        return _json_dumps(
+            {
+                "error": {
+                    "code": "image_storage_error",
+                    "message": f"错误：截图落盘失败：{exc}",
+                },
+                "retryable": False,
+            }
+        )
+
+    dumped = _json_dumps(payload)
+    if len(dumped) <= max_chars:
+        return dumped
+
     try:
         file_path, file_size_bytes, raw_json_path = _write_large_payload(
-            payload, result_data_dir, retention_hours, max_stored_results
+            payload,
+            result_data_dir,
+            retention_hours,
+            max_stored_results,
+            stem=stem,
+            cleanup=not screenshot_stored,
         )
     except Exception as exc:
         preview_limit = max(200, max_chars - 260)
@@ -639,6 +750,10 @@ async def _tool_payload(
         "content_chars": len(dumped),
         "max_output_chars": max_chars,
     }
+    result = payload.get("result")
+    screenshot = result.get("screenshot") if isinstance(result, dict) else None
+    if isinstance(screenshot, dict):
+        compact["images"] = [screenshot]
 
     sandbox_path: str | None = None
     raw_sandbox_path: str | None = None
@@ -1217,6 +1332,10 @@ class CloudflareBrowserRuntime:
             )
             if error:
                 raise CloudflareParamError(error)
+            if len(formats) < 2:
+                raise CloudflareParamError(
+                    "错误：snapshot 的 formats 至少需要两种格式；单格式请使用对应单页端点。"
+                )
             kwargs["formats"] = formats
         body, error = _page_body(kwargs, _PAGE_EXTRA_FIELDS.get(endpoint))
         if error:
@@ -1677,8 +1796,9 @@ _FETCH_MODE_PROPERTIES = {
     },
     "formats": {
         "type": "array",
+        "minItems": 2,
         "items": {"type": "string", "enum": SNAPSHOT_FORMATS},
-        "description": "Snapshot formats; avoid screenshot unless image data is required.",
+        "description": "Snapshot requires at least two formats; screenshots are saved to files and returned as paths.",
     },
 }
 
