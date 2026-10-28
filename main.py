@@ -9,6 +9,7 @@ from .plugin_service import CloudflareBrowserService
 from .tools.cloudflare_browser import (
     PLUGIN_NAME,
     TOOL_NAMES,
+    LEGACY_TOOL_NAMES,
     CloudflareBrowserRuntime,
     build_tools,
     get_plugin_data_dir,
@@ -57,7 +58,7 @@ class CloudflareBrowserRunPlugin(Star):
             tool_mgr = self.context.get_llm_tool_manager()
         except Exception:
             return
-        for name in TOOL_NAMES:
+        for name in (*TOOL_NAMES, *LEGACY_TOOL_NAMES):
             try:
                 tool_mgr.remove_func(name)
             except Exception:

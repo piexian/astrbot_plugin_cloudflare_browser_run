@@ -1,7 +1,10 @@
-"""Cloudflare Browser Rendering / Browser Run 工具实现。"""
+"""Cloudflare Browser Run 工具与共享 Runtime。"""
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
 import json
 import re
 import time
@@ -37,6 +40,10 @@ API_BASE = "https://api.cloudflare.com/client/v4"
 RESULTS_DIR_NAME = "cloudflare_browser_results"
 
 TOOL_NAMES = (
+    "cf_browser_fetch",
+    "cf_browser_crawl",
+)
+LEGACY_TOOL_NAMES = (
     "cf_browser_markdown",
     "cf_browser_content",
     "cf_browser_links",
@@ -55,6 +62,8 @@ CONFIG_PATHS = {
     "default_render": ("request_settings", "default_render"),
     "max_crawl_limit": ("request_settings", "max_crawl_limit"),
     "max_output_chars": ("output_settings", "max_output_chars"),
+    "result_retention_hours": ("output_settings", "result_retention_hours"),
+    "max_stored_results": ("output_settings", "max_stored_results"),
 }
 
 CONFIG_DEFAULTS = {
@@ -65,8 +74,12 @@ CONFIG_DEFAULTS = {
     "default_render": False,
     "max_crawl_limit": 100,
     "max_output_chars": 12000,
+    "result_retention_hours": 24,
+    "max_stored_results": 50,
 }
 
+IDEMPOTENT_RETRIES = 2
+MAX_RETRY_AFTER_SECONDS = 30.0
 RESOURCE_TYPES = [
     "document",
     "stylesheet",
@@ -91,6 +104,9 @@ WAIT_UNTIL = ["load", "domcontentloaded", "networkidle0", "networkidle2"]
 LINK_SOURCES = ["all", "sitemaps", "links"]
 CRAWL_FORMATS = ["html", "markdown", "json"]
 CRAWL_PURPOSES = ["search", "ai-input", "ai-train"]
+CRAWL_CONTENT_USES = ["reference", "full"]
+SNAPSHOT_FORMATS = ["content", "screenshot", "markdown", "accessibilityTree"]
+SNAPSHOT_DEFAULT_FORMATS = ["markdown", "accessibilityTree"]
 CRAWL_STATUSES = [
     "queued",
     "errored",
@@ -112,6 +128,7 @@ CF_KEY_MAP = {
     "best_attempt": "bestAttempt",
     "cache_ttl": "cacheTTL",
     "crawl_purposes": "crawlPurposes",
+    "content_use": "contentUse",
     "default_cache_ttl": "defaultCacheTTL",
     "device_scale_factor": "deviceScaleFactor",
     "emulate_media_type": "emulateMediaType",
@@ -124,6 +141,7 @@ CF_KEY_MAP = {
     "include_external_links": "includeExternalLinks",
     "include_patterns": "includePatterns",
     "include_subdomains": "includeSubdomains",
+    "interesting_only": "interestingOnly",
     "is_landscape": "isLandscape",
     "is_mobile": "isMobile",
     "json_options": "jsonOptions",
@@ -164,6 +182,12 @@ class CloudflareAPIError(Exception):
 
 class CloudflareParamError(ValueError):
     """本地参数校验失败；消息与 LLM Tool 的错误展示保持一致（以“错误：”开头）。"""
+
+
+class _RetryRequest(Exception):
+    def __init__(self, delay: float) -> None:
+        super().__init__(delay)
+        self.delay = delay
 
 
 def missing_credentials(config: dict[str, Any]) -> str | None:
@@ -298,6 +322,27 @@ def _json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+def _tool_error(exc: Exception) -> str:
+    """将 LLM 工具错误转为稳定、可自恢复的结构。"""
+    if isinstance(exc, CloudflareParamError):
+        return _json_dumps(
+            {
+                "error": {"code": "invalid_parameters", "message": str(exc)},
+                "retryable": False,
+            }
+        )
+    message = str(exc)
+    status_match = re.search(r"HTTP (\d{3})", message)
+    status = int(status_match.group(1)) if status_match else None
+    error: dict[str, Any] = {"code": "cloudflare_api_error", "message": message}
+    if status is not None:
+        error["http_status"] = status
+    retryable = status is None or status == 429 or status >= 500
+    if "未配置 Cloudflare" in message:
+        retryable = False
+    return _json_dumps({"error": error, "retryable": retryable})
+
+
 def _local_plugin_data_fallback() -> Path:
     module_path = Path(__file__).resolve()
     for parent in module_path.parents:
@@ -352,15 +397,161 @@ def _format_bytes(size: int) -> str:
     return f"{size} B"
 
 
-def _write_large_payload(payload: dict[str, Any], data_dir: Path) -> tuple[Path, int]:
+def _crawl_markdown(payload: dict[str, Any]) -> str:
+    """将 Crawl 记录展开为可按行读取的 Markdown 报告。"""
+    lines = ["# Cloudflare Crawl Result", ""]
+    for key in ("job_id", "status", "total", "finished", "cursor", "next_cursor"):
+        if key in payload:
+            lines.append(f"- {key}: {payload[key]}")
+    records = payload.get("result")
+    if not isinstance(records, list):
+        return json.dumps(payload, ensure_ascii=False, default=str, indent=2)
+    for index, record in enumerate(records, 1):
+        lines.extend(["", f"## Record {index}", ""])
+        if not isinstance(record, dict):
+            lines.append(json.dumps(record, ensure_ascii=False, default=str, indent=2))
+            continue
+        for key, value in record.items():
+            if key not in {"markdown", "html", "json"} and (
+                value is None or isinstance(value, (str, int, float, bool))
+            ):
+                lines.append(f"- {key}: {value}")
+        for format_name in ("markdown", "html", "json"):
+            content = record.get(format_name)
+            if not _is_present(content):
+                continue
+            lines.extend(["", f"### {format_name}", ""])
+            if format_name == "json" or not isinstance(content, str):
+                lines.append(
+                    json.dumps(content, ensure_ascii=False, default=str, indent=2)
+                )
+            else:
+                lines.append(content)
+    return "\n".join(lines)
+
+
+def _readable_payload(payload: dict[str, Any]) -> tuple[str, str]:
+    """返回适合文件工具分段读取的扩展名和内容。"""
+    result = payload.get("result")
+    if payload.get("type") == "markdown" and isinstance(result, dict):
+        markdown = result.get("markdown")
+        if isinstance(markdown, str):
+            return ".md", markdown
+    if payload.get("type") == "content" and isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, str):
+            return ".html", content
+    if payload.get("type") == "crawl_status" and isinstance(
+        payload.get("result"), list
+    ):
+        return ".md", _crawl_markdown(payload)
+    if payload.get("type") == "snapshot" and isinstance(result, dict):
+        lines = ["# Cloudflare Browser Snapshot", ""]
+        for format_name in ("markdown", "content", "accessibilityTree"):
+            content = result.get(format_name)
+            if not _is_present(content):
+                continue
+            lines.extend(["", f"## {format_name}", ""])
+            lines.append(
+                content
+                if isinstance(content, str)
+                else json.dumps(content, ensure_ascii=False, default=str, indent=2)
+            )
+        screenshot = result.get("screenshot")
+        if isinstance(screenshot, dict) and screenshot.get("file_path"):
+            lines.extend(["", "## screenshot", ""])
+            for key in (
+                "file_path",
+                "host_file_path",
+                "mime_type",
+                "file_size_bytes",
+                "sandbox_synced",
+                "error",
+            ):
+                if key in screenshot:
+                    lines.append(f"- {key}: {screenshot[key]}")
+        elif _is_present(screenshot):
+            lines.extend(["", "## screenshot", "", "截图见 raw_json_file_path。"])
+        return ".md", "\n".join(lines)
+    return ".json", json.dumps(payload, ensure_ascii=False, default=str, indent=2)
+
+
+_RESULT_FILE_PATTERN = re.compile(
+    r"^(?P<stem>[A-Za-z0-9_.-]+_\d{8}_\d{6}_\d{6}_[0-9a-f]{8})\.(json|md|html|png|jpe?g|webp)$"
+)
+
+
+def _cleanup_result_files(
+    results_dir: Path, retention_hours: int, max_stored_results: int
+) -> None:
+    """按结果组清理插件生成的文件，不触碰其他文件或目录。"""
+    groups: dict[str, list[Path]] = {}
+    if not results_dir.is_dir():
+        return
+    for path in results_dir.iterdir():
+        if not path.is_file():
+            continue
+        match = _RESULT_FILE_PATTERN.fullmatch(path.name)
+        if match:
+            groups.setdefault(match.group("stem"), []).append(path)
+
+    now = time.time()
+    cutoff = now - retention_hours * 3600
+
+    def latest_mtime(paths: list[Path]) -> float:
+        mtimes = []
+        for path in paths:
+            try:
+                mtimes.append(path.stat().st_mtime)
+            except FileNotFoundError:
+                pass
+        return max(mtimes, default=0.0)
+
+    groups_by_age = sorted(groups.items(), key=lambda item: latest_mtime(item[1]))
+    expired = 0
+    while (
+        expired < len(groups_by_age)
+        and latest_mtime(groups_by_age[expired][1]) < cutoff
+    ):
+        expired += 1
+    remove_count = max(expired, len(groups_by_age) - max_stored_results + 1)
+    for _, paths in groups_by_age[:remove_count]:
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _write_large_payload(
+    payload: dict[str, Any],
+    data_dir: Path,
+    retention_hours: int,
+    max_stored_results: int,
+    stem: str | None = None,
+    cleanup: bool = True,
+) -> tuple[Path, int, Path | None]:
     results_dir = data_dir / RESULTS_DIR_NAME
     results_dir.mkdir(parents=True, exist_ok=True)
-    path = results_dir / f"{_result_file_stem(payload)}.json"
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, default=str, indent=2),
-        encoding="utf-8",
+    if cleanup:
+        _cleanup_result_files(results_dir, retention_hours, max_stored_results)
+    stem = stem or _result_file_stem(payload)
+    raw_json = json.dumps(payload, ensure_ascii=False, default=str, indent=2)
+    suffix, readable = _readable_payload(payload)
+    if suffix == ".json":
+        path = results_dir / f"{stem}.json"
+        path.write_text(raw_json, encoding="utf-8")
+        return path.resolve(strict=False), path.stat().st_size, None
+
+    raw_path = results_dir / f"{stem}.json"
+    path = results_dir / f"{stem}{suffix}"
+    raw_path.write_text(raw_json, encoding="utf-8")
+    path.write_text(readable, encoding="utf-8")
+    return (
+        path.resolve(strict=False),
+        path.stat().st_size,
+        raw_path.resolve(strict=False),
     )
-    return path.resolve(strict=False), path.stat().st_size
 
 
 def _computer_use_runtime(context: Any) -> str:
@@ -374,6 +565,24 @@ def _computer_use_runtime(context: Any) -> str:
     except Exception:
         return "local"
     return runtime if runtime in {"local", "sandbox", "none"} else "local"
+
+
+async def _result_data_dir(context: Any, fallback: Path) -> Path:
+    """Local 结果优先放入当前会话可读的工作区。"""
+    try:
+        from astrbot.core.tools.computer_tools.util import workspace_root_for_context
+
+        workspace = await workspace_root_for_context(context)
+    except Exception:
+        workspace = None
+    if workspace is not None:
+        return Path(workspace).expanduser().resolve(strict=False)
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_system_tmp_path
+
+        return Path(get_astrbot_system_tmp_path()) / PLUGIN_NAME
+    except Exception:
+        return fallback
 
 
 async def _upload_result_to_sandbox(context: Any, file_path: Path) -> str:
@@ -403,19 +612,122 @@ def _file_suggested_tools(path: str) -> list[dict[str, Any]]:
     ]
 
 
+def _decode_screenshot(value: str) -> tuple[bytes, str, str]:
+    """解码 Cloudflare 截图并校验实际图片格式。"""
+    encoded = value.strip()
+    if encoded.startswith("data:"):
+        header, separator, encoded = encoded.partition(",")
+        if not separator or ";base64" not in header.lower():
+            raise ValueError("截图 data URL 必须使用 Base64 编码")
+    encoded = "".join(encoded.split())
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("截图不是合法的 Base64 数据") from exc
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return content, ".png", "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return content, ".jpg", "image/jpeg"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return content, ".webp", "image/webp"
+    raise ValueError("截图格式不受支持，仅支持 PNG、JPEG 或 WebP")
+
+
+async def _materialize_screenshot(
+    payload: dict[str, Any],
+    data_dir: Path,
+    context: ContextWrapper[AstrAgentContext] | None,
+    runtime: str,
+    retention_hours: int,
+    max_stored_results: int,
+    stem: str,
+) -> tuple[dict[str, Any], bool]:
+    """将 LLM 结果中的 Base64 截图替换为文件引用。"""
+    result = payload.get("result")
+    screenshot = result.get("screenshot") if isinstance(result, dict) else None
+    if not isinstance(screenshot, str) or not screenshot:
+        return payload, False
+
+    content, suffix, mime_type = _decode_screenshot(screenshot)
+    results_dir = data_dir / RESULTS_DIR_NAME
+    results_dir.mkdir(parents=True, exist_ok=True)
+    _cleanup_result_files(results_dir, retention_hours, max_stored_results)
+    path = (results_dir / f"{stem}{suffix}").resolve(strict=False)
+    path.write_bytes(content)
+    reference: dict[str, Any] = {
+        "saved_to_file": True,
+        "file_path": str(path),
+        "file_size_bytes": len(content),
+        "mime_type": mime_type,
+    }
+    if runtime == "sandbox":
+        reference["host_file_path"] = str(path)
+        try:
+            sandbox_path = await _upload_result_to_sandbox(context, path)
+        except Exception as exc:
+            reference["sandbox_synced"] = False
+            reference["error"] = f"图片已落盘，但同步沙盒失败：{str(exc)[:200]}"
+        else:
+            reference["file_path"] = sandbox_path
+            reference["sandbox_synced"] = True
+
+    prepared = dict(payload)
+    prepared_result = dict(result)
+    prepared_result["screenshot"] = reference
+    prepared["result"] = prepared_result
+    return prepared, True
+
+
 async def _tool_payload(
     payload: dict[str, Any],
     max_chars: int,
     data_dir: Path,
     context: ContextWrapper[AstrAgentContext] | None = None,
+    retention_hours: int = 24,
+    max_stored_results: int = 50,
 ) -> str:
     max_chars = max(1000, int(max_chars or CONFIG_DEFAULTS["max_output_chars"]))
+    runtime = _computer_use_runtime(context) if context is not None else "local"
+    result_data_dir = (
+        await _result_data_dir(context, data_dir)
+        if context is not None and runtime == "local"
+        else data_dir
+    )
+    stem = _result_file_stem(payload)
+    try:
+        payload, screenshot_stored = await _materialize_screenshot(
+            payload,
+            result_data_dir,
+            context,
+            runtime,
+            retention_hours,
+            max_stored_results,
+            stem,
+        )
+    except Exception as exc:
+        return _json_dumps(
+            {
+                "error": {
+                    "code": "image_storage_error",
+                    "message": f"错误：截图落盘失败：{exc}",
+                },
+                "retryable": False,
+            }
+        )
+
     dumped = _json_dumps(payload)
     if len(dumped) <= max_chars:
         return dumped
 
     try:
-        file_path, file_size_bytes = _write_large_payload(payload, data_dir)
+        file_path, file_size_bytes, raw_json_path = _write_large_payload(
+            payload,
+            result_data_dir,
+            retention_hours,
+            max_stored_results,
+            stem=stem,
+            cleanup=not screenshot_stored,
+        )
     except Exception as exc:
         preview_limit = max(200, max_chars - 260)
         compact = {
@@ -438,35 +750,53 @@ async def _tool_payload(
         "content_chars": len(dumped),
         "max_output_chars": max_chars,
     }
+    result = payload.get("result")
+    screenshot = result.get("screenshot") if isinstance(result, dict) else None
+    if isinstance(screenshot, dict):
+        compact["images"] = [screenshot]
 
-    runtime = _computer_use_runtime(context) if context is not None else "local"
     sandbox_path: str | None = None
+    raw_sandbox_path: str | None = None
     sandbox_error: str | None = None
+    raw_sandbox_error: str | None = None
     if runtime == "sandbox":
         try:
             sandbox_path = await _upload_result_to_sandbox(context, file_path)
         except Exception as exc:
             sandbox_error = str(exc)
+        else:
+            if raw_json_path is not None:
+                try:
+                    raw_sandbox_path = await _upload_result_to_sandbox(
+                        context, raw_json_path
+                    )
+                except Exception as exc:
+                    raw_sandbox_error = str(exc)
 
     if sandbox_path is not None:
-        # 沙盒运行时：沙盒内文件工具读不到宿主路径，统一改用沙盒侧路径
         compact["sandbox_synced"] = True
         compact["file_path"] = sandbox_path
         compact["host_file_path"] = str(file_path)
+        if raw_sandbox_path is not None:
+            compact["raw_json_file_path"] = raw_sandbox_path
+        if raw_sandbox_error is not None:
+            compact["raw_json_sync_error"] = raw_sandbox_error[:200]
         compact["message"] = (
-            "结果超过最大直接返回长度，已保存到插件持久化目录，并已同步到当前会话沙盒。"
-            "file_path 为沙盒内路径，请使用 astrbot_grep_tool 在其中搜索关键词，"
+            "结果超过最大直接返回长度，已保存为可读内容文件并同步到当前会话沙盒。"
+            "file_path 为沙盒内路径，请使用 astrbot_grep_tool 搜索，"
             "或使用 astrbot_file_read_tool 按行分段读取。"
         )
         compact["suggested_tools"] = _file_suggested_tools(sandbox_path)
         return _json_dumps(compact)
 
     compact["file_path"] = str(file_path)
+    if raw_json_path is not None:
+        compact["raw_json_file_path"] = str(raw_json_path)
     if runtime == "local":
         compact["message"] = (
-            "结果超过最大直接返回长度，已保存到插件持久化目录。"
+            "结果超过最大直接返回长度，已保存到当前会话可读目录。"
             "请使用 astrbot_grep_tool 在 file_path 中搜索关键词，"
-            "或使用 astrbot_file_read_tool 按行分段读取。"
+            "或使用 astrbot_file_read_tool 按行分段读取；raw_json_file_path 保留原始结构。"
         )
         compact["suggested_tools"] = _file_suggested_tools(str(file_path))
         return _json_dumps(compact)
@@ -475,8 +805,7 @@ async def _tool_payload(
     compact["sandbox_synced"] = False
     if runtime == "sandbox":
         compact["message"] = (
-            "结果超过最大直接返回长度，已保存到宿主插件持久化目录，"
-            # 限制错误长度，避免元数据本身吃掉 preview 预算
+            "结果超过最大直接返回长度，已保存到宿主结果目录，"
             f"但同步到当前会话沙盒失败：{str(sandbox_error)[:200]}。"
             "file_path 为宿主机路径，沙盒内的文件工具无法直接访问；"
             "可请管理员先用 astrbot_upload_file 将 file_path 传入沙盒，"
@@ -484,12 +813,11 @@ async def _tool_payload(
         )
     else:
         compact["message"] = (
-            "结果超过最大直接返回长度，已保存到插件持久化目录。"
+            "结果超过最大直接返回长度，已保存到宿主结果目录。"
             "当前未启用 Computer Use 运行时，文件搜索/读取工具不可用；"
             "请直接参考 preview 中的内容预览，或启用本地/沙盒运行时后按 file_path 读取。"
         )
 
-    # 先按序列化后的元数据预留空间再截断 preview，保证兜底 JSON 整体不超 max_chars
     compact["preview"] = ""
     budget = max(0, max_chars - len(_json_dumps(compact)))
     compact["preview"] = dumped[:budget]
@@ -529,7 +857,7 @@ def _list_from_value(value: Any) -> list[Any]:
     return [value]
 
 
-def _common_properties() -> dict[str, Any]:
+def _all_common_properties() -> dict[str, Any]:
     resource_schema = {
         "type": "array",
         "items": {"type": "string", "enum": RESOURCE_TYPES},
@@ -585,6 +913,7 @@ def _common_properties() -> dict[str, Any]:
                 "timeout": {
                     "type": "integer",
                     "minimum": 0,
+                    "maximum": 60000,
                     "description": "Wait timeout in ms.",
                 },
             },
@@ -737,6 +1066,38 @@ def _common_properties() -> dict[str, Any]:
     }
 
 
+_BASIC_PAGE_FIELDS = {
+    "url",
+    "html",
+    "cache_ttl",
+    "goto_options",
+    "wait_for_selector",
+    "wait_for_timeout",
+    "set_javascript_enabled",
+    "allow_resource_types",
+    "reject_resource_types",
+    "best_attempt",
+}
+
+
+def _common_properties() -> dict[str, Any]:
+    properties = _all_common_properties()
+    return {
+        key: value for key, value in properties.items() if key in _BASIC_PAGE_FIELDS
+    }
+
+
+def _advanced_options_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "description": (
+            "Optional advanced browser options: viewport, action_timeout, user_agent, "
+            "emulate_media_type, request patterns, headers, authenticate, cookies, "
+            "script/style tags. Unknown keys are rejected."
+        ),
+    }
+
+
 def _page_parameters(
     extra: dict[str, Any] | None = None, required: list[str] | None = None
 ) -> dict[str, Any]:
@@ -756,6 +1117,34 @@ def _page_parameters(
     return schema
 
 
+def _retry_delay(headers: Any, attempt: int) -> float | None:
+    raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+    if raw is not None:
+        try:
+            delay = max(0.0, float(raw))
+        except (TypeError, ValueError):
+            delay = None
+        if delay is not None:
+            return delay if delay <= MAX_RETRY_AFTER_SECONDS else None
+    return min(0.5 * (2**attempt), 2.0)
+
+
+def _response_metadata(headers: Any) -> dict[str, Any]:
+    if not hasattr(headers, "get"):
+        return {}
+    raw = headers.get("X-Browser-Ms-Used")
+    if raw is None:
+        return {}
+    try:
+        value: int | float = int(raw)
+    except (TypeError, ValueError):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return {}
+    return {"browser_ms_used": value}
+
+
 class CloudflareBrowserRuntime:
     def __init__(self, config: dict[str, Any], data_dir: Path | str) -> None:
         self.config = config
@@ -769,6 +1158,20 @@ class CloudflareBrowserRuntime:
     def max_output_chars(self) -> int:
         return _to_int(
             self.cfg("max_output_chars"), CONFIG_DEFAULTS["max_output_chars"], 1000
+        )
+
+    @property
+    def result_retention_hours(self) -> int:
+        return _to_int(
+            self.cfg("result_retention_hours"),
+            CONFIG_DEFAULTS["result_retention_hours"],
+            1,
+        )
+
+    @property
+    def max_stored_results(self) -> int:
+        return _to_int(
+            self.cfg("max_stored_results"), CONFIG_DEFAULTS["max_stored_results"], 1
         )
 
     @property
@@ -793,6 +1196,8 @@ class CloudflareBrowserRuntime:
         *,
         params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
+        retry_safe: bool = False,
+        with_metadata: bool = False,
     ) -> Any:
         credential_error = self.validate_credentials()
         if credential_error:
@@ -816,43 +1221,76 @@ class CloudflareBrowserRuntime:
             1,
         )
 
-        try:
-            async with aiohttp.ClientSession(
-                trust_env=True,
-                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
-            ) as session:
-                async with session.request(
-                    method,
-                    url,
-                    params=params,
-                    json=body,
-                    headers=headers,
-                ) as response:
-                    text = await response.text()
-                    try:
-                        data = json.loads(text) if text else {}
-                    except json.JSONDecodeError:
-                        data = {"raw": text}
+        for attempt in range(IDEMPOTENT_RETRIES + 1):
+            try:
+                async with aiohttp.ClientSession(
+                    trust_env=True,
+                    timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+                ) as session:
+                    async with session.request(
+                        method,
+                        url,
+                        params=params,
+                        json=body,
+                        headers=headers,
+                    ) as response:
+                        text = await response.text()
+                        try:
+                            data = json.loads(text) if text else {}
+                        except json.JSONDecodeError:
+                            data = {"raw": text}
 
-                    if response.status >= 400:
-                        raise CloudflareAPIError(
-                            self._format_error(response.status, data, text, secrets)
+                        if response.status >= 400:
+                            retry_delay = _retry_delay(
+                                getattr(response, "headers", {}), attempt
+                            )
+                            if (
+                                retry_safe
+                                and attempt < IDEMPOTENT_RETRIES
+                                and (response.status == 429 or response.status >= 500)
+                                and retry_delay is not None
+                            ):
+                                raise _RetryRequest(retry_delay)
+                            raise CloudflareAPIError(
+                                self._format_error(response.status, data, text, secrets)
+                            )
+                        if isinstance(data, dict) and data.get("success") is False:
+                            raise CloudflareAPIError(
+                                self._format_error(response.status, data, text, secrets)
+                            )
+                        result = (
+                            data["result"]
+                            if isinstance(data, dict) and "result" in data
+                            else data
                         )
-                    if isinstance(data, dict) and data.get("success") is False:
-                        raise CloudflareAPIError(
-                            self._format_error(response.status, data, text, secrets)
-                        )
-                    if isinstance(data, dict) and "result" in data:
-                        return data["result"]
-                    return data
-        except CloudflareAPIError:
-            raise
-        except Exception as exc:
-            raise CloudflareAPIError(
-                _redact_text(
-                    f"错误：Cloudflare Browser Rendering 请求失败：{exc}", secrets
-                )
-            ) from exc
+                        if with_metadata:
+                            return result, _response_metadata(
+                                getattr(response, "headers", {})
+                            )
+                        return result
+            except _RetryRequest as retry:
+                await asyncio.sleep(retry.delay)
+                continue
+            except CloudflareAPIError:
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if retry_safe and attempt < IDEMPOTENT_RETRIES:
+                    await asyncio.sleep(min(0.5 * (2**attempt), 2.0))
+                    continue
+                raise CloudflareAPIError(
+                    _redact_text(
+                        f"错误：Cloudflare Browser Run 请求失败：{exc}", secrets
+                    )
+                ) from exc
+            except Exception as exc:
+                raise CloudflareAPIError(
+                    _redact_text(
+                        f"错误：Cloudflare Browser Run 请求失败：{exc}", secrets
+                    )
+                ) from exc
+        raise CloudflareAPIError(
+            "错误：Cloudflare Browser Run 请求失败：重试次数已用尽。"
+        )
 
     def _format_error(
         self, status: int, data: Any, raw_text: str, secrets: list[str]
@@ -865,23 +1303,55 @@ class CloudflareBrowserRuntime:
             message = raw_text or _json_dumps(data)
         hint = _error_hint(status)
         return _redact_text(
-            f"错误：Cloudflare Browser Rendering API 返回 HTTP {status}：{message}{hint}",
+            f"错误：Cloudflare Browser Run API 返回 HTTP {status}：{message}{hint}",
             secrets,
         )
 
     # ---- 具名共享业务入口：LLM Tool 与 SDK 服务都走这一条路径 ----
 
     async def page(self, endpoint: str, **kwargs: Any) -> dict[str, Any]:
-        """单页抓取（markdown/content/links/scrape/json），返回 {type, url, result}。"""
+        """单页抓取，返回 {type, url, result}。"""
+        if endpoint not in {
+            "markdown",
+            "content",
+            "links",
+            "scrape",
+            "json",
+            "accessibilityTree",
+            "snapshot",
+        }:
+            raise CloudflareParamError(f"错误：不支持的单页端点：{endpoint}")
         if endpoint == "scrape" and not _is_present(kwargs.get("elements")):
             raise CloudflareParamError("错误：elements 至少需要包含一个 selector。")
+        if endpoint == "snapshot":
+            formats = _list_from_value(
+                kwargs.get("formats") or SNAPSHOT_DEFAULT_FORMATS
+            )
+            error = _validate_values(
+                [str(value) for value in formats], SNAPSHOT_FORMATS, "formats"
+            )
+            if error:
+                raise CloudflareParamError(error)
+            if len(formats) < 2:
+                raise CloudflareParamError(
+                    "错误：snapshot 的 formats 至少需要两种格式；单格式请使用对应单页端点。"
+                )
+            kwargs["formats"] = formats
         body, error = _page_body(kwargs, _PAGE_EXTRA_FIELDS.get(endpoint))
         if error:
             raise CloudflareParamError(error)
-        result = await self.request(
-            "POST", endpoint, params=_query_params(self, kwargs), body=body
+        _validate_timeout_budget(self, kwargs)
+        result, metadata = await self.request(
+            "POST",
+            endpoint,
+            params=_query_params(self, kwargs),
+            body=body,
+            retry_safe=True,
+            with_metadata=True,
         )
-        return {"type": endpoint, "url": kwargs.get("url"), "result": result}
+        payload = {"type": endpoint, "url": kwargs.get("url"), "result": result}
+        payload.update(metadata)
+        return payload
 
     async def page_markdown(
         self, *, url: Any = None, html: Any = None, **options: Any
@@ -910,6 +1380,27 @@ class CloudflareBrowserRuntime:
     ) -> dict[str, Any]:
         return await self.page("json", url=url, html=html, **options)
 
+    async def page_accessibility_tree(
+        self, *, url: Any = None, html: Any = None, **options: Any
+    ) -> dict[str, Any]:
+        options.setdefault("interesting_only", True)
+        return await self.page("accessibilityTree", url=url, html=html, **options)
+
+    async def page_snapshot(
+        self,
+        *,
+        url: Any = None,
+        html: Any = None,
+        formats: Any = None,
+        **options: Any,
+    ) -> dict[str, Any]:
+        selected_formats = _list_from_value(formats or SNAPSHOT_DEFAULT_FORMATS)
+        if "accessibilityTree" in selected_formats:
+            options.setdefault("interesting_only", True)
+        return await self.page(
+            "snapshot", url=url, html=html, formats=selected_formats, **options
+        )
+
     async def crawl_start(self, url: Any = None, **options: Any) -> dict[str, Any]:
         """启动异步 Crawl 任务，返回 {type, job_id, message}。"""
         if not _is_present(url):
@@ -919,8 +1410,9 @@ class CloudflareBrowserRuntime:
         max_crawl_limit = _to_int(
             self.cfg("max_crawl_limit"), CONFIG_DEFAULTS["max_crawl_limit"], 1
         )
-        requested_limit = _to_int(
+        requested_limit = _validated_int(
             options.get("limit", min(CRAWL_DEFAULT_LIMIT, max_crawl_limit)),
+            "limit",
             CRAWL_DEFAULT_LIMIT,
             1,
         )
@@ -939,6 +1431,7 @@ class CloudflareBrowserRuntime:
             "max_age",
             "modified_since",
             "crawl_purposes",
+            "content_use",
             "options",
             "json_options",
             "goto_options",
@@ -959,6 +1452,9 @@ class CloudflareBrowserRuntime:
             "add_script_tag",
             "add_style_tag",
         ]
+        unknown = sorted(set(options) - set(fields) - {"cache_ttl"})
+        if unknown:
+            raise CloudflareParamError(f"错误：包含未知参数：{', '.join(unknown)}")
         body = {
             field_name: options.get(field_name)
             for field_name in fields
@@ -972,15 +1468,23 @@ class CloudflareBrowserRuntime:
         error = _validate_crawl_body(body)
         if error:
             raise CloudflareParamError(error)
+        if _to_bool(body.get("render"), CRAWL_DEFAULT_RENDER):
+            _validate_timeout_budget(self, options)
 
-        job_id = await self.request(
-            "POST", "crawl", params=_query_params(self, options), body=_to_cf_keys(body)
+        job_id, metadata = await self.request(
+            "POST",
+            "crawl",
+            params=_query_params(self, options),
+            body=_to_cf_keys(body),
+            with_metadata=True,
         )
-        return {
+        payload = {
             "type": "crawl_start",
             "job_id": job_id,
             "message": "Crawl 任务已启动。",
         }
+        payload.update(metadata)
+        return payload
 
     async def crawl_status(self, job_id: Any = None, **options: Any) -> dict[str, Any]:
         """查询 Crawl 任务状态，返回以远端结果合并的业务字典。"""
@@ -990,34 +1494,47 @@ class CloudflareBrowserRuntime:
             raise CloudflareParamError(
                 f"错误：status 必须是以下值之一：{', '.join(CRAWL_STATUSES)}"
             )
-
+        unknown = sorted(set(options) - {"status", "cursor", "limit", "cache_ttl"})
+        if unknown:
+            raise CloudflareParamError(f"错误：包含未知参数：{', '.join(unknown)}")
         params = _query_params(self, options)
         if status:
             params["status"] = status
         if _is_present(options.get("cursor")):
-            params["cursor"] = _to_int(options.get("cursor"), 0, 0)
+            params["cursor"] = _validated_int(options.get("cursor"), "cursor", 0, 0)
         if _is_present(options.get("limit")):
-            params["limit"] = _to_int(options.get("limit"), 50, 1)
-
-        result = await self.request("GET", f"crawl/{job_id}", params=params)
-        return {
+            params["limit"] = _validated_int(options.get("limit"), "limit", 50, 1)
+        result, metadata = await self.request(
+            "GET",
+            f"crawl/{job_id}",
+            params=params,
+            retry_safe=True,
+            with_metadata=True,
+        )
+        payload = {
             "type": "crawl_status",
             **(result if isinstance(result, dict) else {"result": result}),
         }
+        payload.update(metadata)
+        return payload
 
     async def crawl_cancel(self, job_id: Any) -> dict[str, Any]:
         """取消 Crawl 任务，返回以远端结果合并的业务字典。"""
         job_id = _safe_job_id(job_id)
-        result = await self.request("DELETE", f"crawl/{job_id}")
-        return {
+        result, metadata = await self.request(
+            "DELETE", f"crawl/{job_id}", retry_safe=True, with_metadata=True
+        )
+        payload = {
             "type": "crawl_cancel",
             **(result if isinstance(result, dict) else {"result": result}),
         }
+        payload.update(metadata)
+        return payload
 
 
 _ERROR_HINTS = {
     401: "（排查：API Token 无效或过期，请检查 api_token 配置。）",
-    403: "（排查：API Token 权限不足，需要 Browser Rendering - Edit 权限。）",
+    403: "（排查：API Token 权限不足，需要 Browser Run / Browser Rendering - Edit 权限。）",
     429: "（排查：请求频率超限或浏览器时间额度用尽，请降低调用频率或升级 Workers 计划。）",
     400: "（排查：请求参数有误，请检查 url、selector 或格式是否符合要求。）",
     404: "（排查：请求的资源不存在，crawl 任务 ID 可能已过期或无效。）",
@@ -1034,6 +1551,8 @@ _PAGE_EXTRA_FIELDS = {
     "links": ["exclude_external_links", "visible_links_only"],
     "scrape": ["elements"],
     "json": ["prompt", "response_format", "custom_ai"],
+    "accessibilityTree": ["interesting_only", "root"],
+    "snapshot": ["formats", "interesting_only", "root"],
 }
 
 _JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
@@ -1049,18 +1568,76 @@ def _safe_job_id(value: Any) -> str:
     return job_id
 
 
+def _validated_int(
+    value: Any,
+    name: str,
+    default: int,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    if value is None or value == "":
+        value = default
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise CloudflareParamError(f"错误：{name} 必须是整数。")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise CloudflareParamError(f"错误：{name} 必须是整数。") from exc
+    if minimum is not None and number < minimum:
+        raise CloudflareParamError(f"错误：{name} 必须大于等于 {minimum}。")
+    if maximum is not None and number > maximum:
+        raise CloudflareParamError(f"错误：{name} 必须小于等于 {maximum}。")
+    return number
+
+
+def _validate_timeout_budget(
+    runtime: CloudflareBrowserRuntime, kwargs: dict[str, Any]
+) -> None:
+    """避免独立浏览器计时器总和超过 HTTP 总超时。"""
+    total_ms = 0
+    for field_name in ("goto_options", "wait_for_selector"):
+        options = kwargs.get(field_name)
+        if not _is_present(options):
+            continue
+        if not isinstance(options, dict):
+            raise CloudflareParamError(f"错误：{field_name} 必须是对象。")
+        if _is_present(options.get("timeout")):
+            total_ms += _validated_int(
+                options["timeout"], f"{field_name}.timeout", 0, 0
+            )
+    for field_name in ("wait_for_timeout", "action_timeout"):
+        if _is_present(kwargs.get(field_name)):
+            total_ms += _validated_int(kwargs[field_name], field_name, 0, 0)
+    timeout_seconds = _to_int(
+        runtime.cfg("timeout_seconds"), CONFIG_DEFAULTS["timeout_seconds"], 1
+    )
+    if total_ms > timeout_seconds * 1000:
+        raise CloudflareParamError(
+            f"错误：浏览器等待参数合计 {total_ms}ms，超过 timeout_seconds="
+            f"{timeout_seconds}s；请减少等待或提高请求超时配置。"
+        )
+
+
 def _query_params(
     runtime: CloudflareBrowserRuntime, kwargs: dict[str, Any]
 ) -> dict[str, Any]:
     cache_ttl = kwargs.get("cache_ttl", runtime.default_cache_ttl)
-    return {"cacheTTL": _to_int(cache_ttl, runtime.default_cache_ttl, 0, 86400)}
+    return {
+        "cacheTTL": _validated_int(
+            cache_ttl, "cache_ttl", runtime.default_cache_ttl, 0, 86400
+        )
+    }
 
 
 def _page_body(
     kwargs: dict[str, Any], extra_fields: list[str] | None = None
 ) -> tuple[dict[str, Any] | None, str | None]:
-    if not _is_present(kwargs.get("url")) and not _is_present(kwargs.get("html")):
+    has_url = _is_present(kwargs.get("url"))
+    has_html = _is_present(kwargs.get("html"))
+    if not has_url and not has_html:
         return None, "错误：必须提供 url 或 html。"
+    if has_url and has_html:
+        return None, "错误：url 和 html 只能提供其中一个。"
 
     fields = [
         "url",
@@ -1086,12 +1663,20 @@ def _page_body(
     ]
     if extra_fields:
         fields.extend(extra_fields)
+    unknown = sorted(set(kwargs) - set(fields) - {"cache_ttl"})
+    if unknown:
+        return None, f"错误：包含未知参数：{', '.join(unknown)}"
 
     body = {
         field_name: kwargs.get(field_name)
         for field_name in fields
         if field_name in kwargs
     }
+    if extra_fields and "response_format" in extra_fields:
+        if not _is_present(body.get("prompt")) and not _is_present(
+            body.get("response_format")
+        ):
+            return None, "错误：JSON 提取至少需要 prompt 或 response_format。"
     error = _validate_body_enums(body)
     if error:
         return None, error
@@ -1145,296 +1730,321 @@ class _CloudflareTool(FunctionTool[AstrAgentContext]):
         return self.runtime
 
     async def _call_runtime(
-        self, coro, context: ContextWrapper[AstrAgentContext] | None
+        self, coro, context: ContextWrapper[AstrAgentContext] | None, transform=None
     ) -> ToolExecResult:
-        """执行共享业务请求：本地/远端错误以字符串返回，成功结果走 _tool_payload 桥接。"""
+        """执行共享业务请求，错误返回字符串，成功结果按需转换后桥接。"""
         runtime = self._runtime()
         try:
             payload = await coro
         except (CloudflareParamError, CloudflareAPIError) as exc:
-            return str(exc)
+            return _tool_error(exc)
+        if transform is not None:
+            payload = transform(payload)
         return await _tool_payload(
-            payload, runtime.max_output_chars, runtime.data_dir, context
+            payload,
+            runtime.max_output_chars,
+            runtime.data_dir,
+            context,
+            runtime.result_retention_hours,
+            runtime.max_stored_results,
         )
 
 
-@dataclass(config={"arbitrary_types_allowed": True})
-class CloudflareMarkdownTool(_CloudflareTool):
-    name: str = "cf_browser_markdown"
-    description: str = (
-        "Fetch a URL or HTML through Cloudflare Browser Rendering and return Markdown. "
-        "JavaScript is executed by default (headless Chrome renders the page first)."
-    )
-    parameters: dict = Field(default_factory=_page_parameters)
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
-        return await self._call_runtime(
-            self._runtime().page_markdown(**kwargs), context
-        )
-
-
-@dataclass(config={"arbitrary_types_allowed": True})
-class CloudflareContentTool(_CloudflareTool):
-    name: str = "cf_browser_content"
-    description: str = (
-        "Fetch a URL or HTML through Cloudflare Browser Rendering and return rendered HTML content. "
-        "JavaScript is executed by default (headless Chrome renders the page first)."
-    )
-    parameters: dict = Field(default_factory=_page_parameters)
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
-        return await self._call_runtime(self._runtime().page_content(**kwargs), context)
-
-
-@dataclass(config={"arbitrary_types_allowed": True})
-class CloudflareLinksTool(_CloudflareTool):
-    name: str = "cf_browser_links"
-    description: str = (
-        "Extract links from a URL or HTML through Cloudflare Browser Rendering. "
-        "JavaScript is executed by default (headless Chrome renders the page first)."
-    )
-    parameters: dict = Field(
-        default_factory=lambda: _page_parameters(
-            {
-                "exclude_external_links": {
-                    "type": "boolean",
-                    "description": "Exclude links pointing to external domains. Default is false.",
-                },
-                "visible_links_only": {
-                    "type": "boolean",
-                    "description": "Return only visible links. Default is false.",
-                },
-            }
-        )
-    )
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
-        return await self._call_runtime(self._runtime().page_links(**kwargs), context)
-
-
-@dataclass(config={"arbitrary_types_allowed": True})
-class CloudflareScrapeTool(_CloudflareTool):
-    name: str = "cf_browser_scrape"
-    description: str = (
-        "Scrape specific page elements using CSS selectors through Cloudflare Browser Rendering. "
-        "JavaScript is executed by default (headless Chrome renders the page first)."
-    )
-    parameters: dict = Field(
-        default_factory=lambda: _page_parameters(
-            {
-                "elements": {
-                    "type": "array",
-                    "minItems": 1,
-                    "description": "CSS selectors to extract.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "selector": {
-                                "type": "string",
-                                "description": "CSS selector string.",
-                            }
-                        },
-                        "required": ["selector"],
-                    },
-                }
-            },
-            required=["elements"],
-        )
-    )
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
-        return await self._call_runtime(self._runtime().page_scrape(**kwargs), context)
-
-
-@dataclass(config={"arbitrary_types_allowed": True})
-class CloudflareJsonTool(_CloudflareTool):
-    name: str = "cf_browser_json"
-    description: str = (
-        "Extract structured JSON from a URL or HTML using Cloudflare Browser Rendering JSON extraction. "
-        "JavaScript is executed by default (headless Chrome renders the page first)."
-    )
-    parameters: dict = Field(
-        default_factory=lambda: _page_parameters(
-            {
-                "prompt": {
-                    "type": "string",
-                    "description": "Instruction for JSON extraction.",
-                },
-                "response_format": {
-                    "type": "object",
-                    "description": "Expected output format.",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "description": "Format type, e.g. json_schema.",
-                        },
-                        "json_schema": {
-                            "type": "object",
-                            "description": "JSON Schema defining the output structure.",
-                        },
-                    },
-                    "required": ["type"],
-                },
-                "custom_ai": {
-                    "type": "array",
-                    "description": "Custom AI models for extraction (BYO API key).",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "model": {
-                                "type": "string",
-                                "description": "Model ID as provider/model.",
-                            },
-                            "authorization": {
-                                "type": "string",
-                                "description": "Bearer token or API key.",
-                            },
-                        },
-                        "required": ["model"],
-                    },
-                },
-            }
-        )
-    )
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
-        return await self._call_runtime(self._runtime().page_json(**kwargs), context)
-
-
-@dataclass(config={"arbitrary_types_allowed": True})
-class CloudflareCrawlStartTool(_CloudflareTool):
-    name: str = "cf_browser_crawl_start"
-    description: str = (
-        "Start an asynchronous Cloudflare Browser Run crawl job for a website. "
-        "By default render is false (fast HTML fetch without JavaScript). "
-        "Set render=true to execute JavaScript on each page (slower, costs browser hours)."
-    )
-    parameters: dict = Field(
-        default_factory=lambda: {
+_FETCH_MODE_PROPERTIES = {
+    "exclude_external_links": {
+        "type": "boolean",
+        "description": "Links mode: exclude external domains.",
+    },
+    "visible_links_only": {
+        "type": "boolean",
+        "description": "Links mode: return only visible links.",
+    },
+    "elements": {
+        "type": "array",
+        "minItems": 1,
+        "description": "Scrape mode: CSS selectors to extract.",
+        "items": {
+            "type": "object",
+            "properties": {"selector": {"type": "string"}},
+            "required": ["selector"],
+        },
+    },
+    "prompt": {"type": "string", "description": "JSON mode extraction instruction."},
+    "response_format": {
+        "type": "object",
+        "description": "JSON mode response schema; prompt or response_format is required.",
+    },
+    "custom_ai": {
+        "type": "array",
+        "description": "JSON mode custom models, in fallback order.",
+        "items": {
             "type": "object",
             "properties": {
-                **{
-                    key: value
-                    for key, value in _common_properties().items()
-                    if key not in {"html", "user_agent"}
-                },
-                "url": {"type": "string", "description": "Starting URL for the crawl."},
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Max pages to crawl. Default 10, capped by plugin max_crawl_limit.",
-                },
-                "depth": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100000,
-                    "description": "Max link depth from starting URL.",
-                },
-                "formats": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": CRAWL_FORMATS},
-                    "description": "Response formats: html, markdown, json. Default is markdown.",
-                },
-                "render": {
-                    "type": "boolean",
-                    "description": "If true, execute JavaScript on each page (headless Chrome). Default is false (fast HTML fetch).",
-                },
-                "source": {
-                    "type": "string",
-                    "enum": LINK_SOURCES,
-                    "description": "URL discovery source: all, sitemaps, or links. Default is all.",
-                },
-                "max_age": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 604800,
-                    "description": "Max cache age in seconds before re-fetching. Default 86400.",
-                },
-                "modified_since": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Unix timestamp (seconds); only crawl pages modified since then.",
-                },
-                "crawl_purposes": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": CRAWL_PURPOSES},
-                    "description": "Declared content usage: search, ai-input, ai-train.",
-                },
-                "options": {
-                    "type": "object",
-                    "description": "Crawl scope options.",
-                    "properties": {
-                        "include_external_links": {
-                            "type": "boolean",
-                            "description": "Follow links to external domains. Default false.",
-                        },
-                        "include_subdomains": {
-                            "type": "boolean",
-                            "description": "Follow links to subdomains. Default false.",
-                        },
-                        "include_patterns": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Wildcard patterns; only visit matching URLs.",
-                        },
-                        "exclude_patterns": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Wildcard patterns; skip matching URLs. Takes priority over include.",
-                        },
+                "model": {"type": "string"},
+                "authorization": {"type": "string"},
+            },
+            "required": ["model"],
+        },
+    },
+    "interesting_only": {
+        "type": "boolean",
+        "description": "Keep only semantically meaningful accessibility nodes.",
+    },
+    "root": {
+        "type": "string",
+        "description": "CSS selector anchoring an accessibility subtree.",
+    },
+    "formats": {
+        "type": "array",
+        "minItems": 2,
+        "items": {"type": "string", "enum": SNAPSHOT_FORMATS},
+        "description": "Snapshot requires at least two formats; screenshots are saved to files and returned as paths.",
+    },
+}
+
+
+def _fetch_parameters() -> dict[str, Any]:
+    schema = _page_parameters(_FETCH_MODE_PROPERTIES)
+    schema["properties"]["mode"] = {
+        "type": "string",
+        "enum": [
+            "markdown",
+            "content",
+            "links",
+            "scrape",
+            "json",
+            "accessibility_tree",
+            "snapshot",
+        ],
+        "description": "Fetch operation. Default markdown is best for reading pages.",
+    }
+    schema["properties"]["advanced_options"] = _advanced_options_schema()
+    schema["description"] = (
+        "Provide url or html, not both. elements is for scrape; prompt/response_format "
+        "is for json; formats/root are for snapshot or accessibility_tree."
+    )
+    return schema
+
+
+def _crawl_parameters() -> dict[str, Any]:
+    properties = {
+        key: value for key, value in _common_properties().items() if key != "html"
+    }
+    properties.update(
+        {
+            "action": {
+                "type": "string",
+                "enum": ["start", "status", "cancel"],
+                "description": "Crawl operation.",
+            },
+            "job_id": {"type": "string", "description": "Required for status/cancel."},
+            "url": {"type": "string", "description": "Required for start."},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Start: max pages. Status: max records; use 1 while polling.",
+            },
+            "depth": {"type": "integer", "minimum": 1},
+            "formats": {
+                "type": "array",
+                "items": {"type": "string", "enum": CRAWL_FORMATS},
+            },
+            "render": {
+                "type": "boolean",
+                "description": "Execute JavaScript; slower and consumes browser hours.",
+            },
+            "source": {"type": "string", "enum": LINK_SOURCES},
+            "max_age": {"type": "integer", "minimum": 0, "maximum": 604800},
+            "modified_since": {"type": "integer", "minimum": 1},
+            "crawl_purposes": {
+                "type": "array",
+                "items": {"type": "string", "enum": CRAWL_PURPOSES},
+            },
+            "content_use": {"type": "string", "enum": CRAWL_CONTENT_USES},
+            "options": {
+                "type": "object",
+                "description": "Crawl scope options.",
+                "properties": {
+                    "include_external_links": {"type": "boolean"},
+                    "include_subdomains": {"type": "boolean"},
+                    "include_patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
                     },
-                },
-                "json_options": {
-                    "type": "object",
-                    "description": "Options for json format extraction (required if formats includes json).",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "Extraction instruction.",
-                        },
-                        "response_format": {
-                            "type": "object",
-                            "description": "Expected output JSON schema.",
-                        },
-                        "custom_ai": {
-                            "type": "array",
-                            "description": "Custom AI models (BYO API key).",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "model": {
-                                        "type": "string",
-                                        "description": "Model ID as provider/model.",
-                                    },
-                                    "authorization": {
-                                        "type": "string",
-                                        "description": "Bearer token or API key.",
-                                    },
-                                },
-                                "required": ["model"],
-                            },
-                        },
+                    "exclude_patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
                     },
                 },
             },
-            "required": ["url"],
+            "json_options": {
+                "type": "object",
+                "description": "Required when formats includes json.",
+            },
+            "status": {"type": "string", "enum": CRAWL_STATUSES},
+            "cursor": {"type": "integer", "minimum": 0},
+            "advanced_options": _advanced_options_schema(),
         }
     )
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["action"],
+        "description": (
+            "Start returns a job_id. After 5 seconds poll action=status with limit=1 "
+            "and cache_ttl=0; fetch full records after completion. Cancel needs job_id only."
+        ),
+    }
+
+
+def _expand_advanced_options(
+    kwargs: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    advanced = kwargs.pop("advanced_options", None)
+    if not _is_present(advanced):
+        return kwargs, None
+    if not isinstance(advanced, dict):
+        return None, "错误：advanced_options 必须是对象。"
+    duplicates = sorted(set(kwargs) & set(advanced))
+    if duplicates:
+        return (
+            None,
+            f"错误：参数不能同时放在顶层和 advanced_options：{', '.join(duplicates)}",
+        )
+    return {**kwargs, **advanced}, None
+
+
+_CRAWL_ACTION_FIELDS = {
+    "start": {
+        "url",
+        "limit",
+        "depth",
+        "formats",
+        "render",
+        "source",
+        "max_age",
+        "modified_since",
+        "crawl_purposes",
+        "content_use",
+        "options",
+        "json_options",
+        "cache_ttl",
+        "advanced_options",
+        "goto_options",
+        "wait_for_selector",
+        "wait_for_timeout",
+        "set_javascript_enabled",
+        "allow_resource_types",
+        "reject_resource_types",
+        "best_attempt",
+        "viewport",
+        "action_timeout",
+        "user_agent",
+        "emulate_media_type",
+        "allow_request_pattern",
+        "reject_request_pattern",
+        "set_extra_http_headers",
+        "authenticate",
+        "cookies",
+        "add_script_tag",
+        "add_style_tag",
+    },
+    "status": {"job_id", "status", "cursor", "limit", "cache_ttl"},
+    "cancel": {"job_id"},
+}
+
+
+@dataclass(config={"arbitrary_types_allowed": True})
+class CloudflareFetchTool(_CloudflareTool):
+    name: str = "cf_browser_fetch"
+    description: str = (
+        "Fetch and render a page with Cloudflare Browser Run. Use markdown for reading, "
+        "content for raw HTML, links for navigation, scrape with selectors, json for "
+        "structured extraction, accessibility_tree for interactive semantics, or snapshot "
+        "for multiple formats in one call."
+    )
+    parameters: dict = Field(default_factory=_fetch_parameters)
 
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        return await self._call_runtime(self._runtime().crawl_start(**kwargs), context)
+        mode = kwargs.pop("mode", "markdown")
+        endpoints = {
+            "markdown": "markdown",
+            "content": "content",
+            "links": "links",
+            "scrape": "scrape",
+            "json": "json",
+            "accessibility_tree": "accessibilityTree",
+            "snapshot": "snapshot",
+        }
+        if mode not in endpoints:
+            return _tool_error(
+                CloudflareParamError(
+                    f"错误：mode 必须是以下值之一：{', '.join(endpoints)}"
+                )
+            )
+        kwargs, error = _expand_advanced_options(kwargs)
+        if error:
+            return _tool_error(CloudflareParamError(error))
+        runtime = self._runtime()
+        if mode == "accessibility_tree":
+            coro = runtime.page_accessibility_tree(**kwargs)
+        elif mode == "snapshot":
+            coro = runtime.page_snapshot(**kwargs)
+        else:
+            coro = runtime.page(endpoints[mode], **kwargs)
+        return await self._call_runtime(coro, context)
+
+
+def _crawl_start_guidance(payload: dict[str, Any]) -> dict[str, Any]:
+    job_id = payload.get("job_id")
+    if isinstance(job_id, str) and job_id:
+        payload["next_action"] = {
+            "tool": "cf_browser_crawl",
+            "after_seconds": 5,
+            "args": {"action": "status", "job_id": job_id, "limit": 1, "cache_ttl": 0},
+            "message": "Poll with limit=1 while running; fetch full records after completion.",
+        }
+    return payload
+
+
+@dataclass(config={"arbitrary_types_allowed": True})
+class CloudflareCrawlTool(_CloudflareTool):
+    name: str = "cf_browser_crawl"
+    description: str = (
+        "Start, poll, or cancel an asynchronous Cloudflare Browser Run crawl. "
+        "Default start uses render=false and markdown for low-cost AI ingestion."
+    )
+    parameters: dict = Field(default_factory=_crawl_parameters)
+
+    async def call(
+        self, context: ContextWrapper[AstrAgentContext], **kwargs
+    ) -> ToolExecResult:
+        action = kwargs.pop("action", None)
+        if action not in _CRAWL_ACTION_FIELDS:
+            return _tool_error(
+                CloudflareParamError("错误：action 必须是 start、status 或 cancel。")
+            )
+        unknown = sorted(set(kwargs) - _CRAWL_ACTION_FIELDS[action])
+        if unknown:
+            return _tool_error(
+                CloudflareParamError(
+                    f"错误：action={action} 不支持参数：{', '.join(unknown)}"
+                )
+            )
+        if action == "start":
+            kwargs, error = _expand_advanced_options(kwargs)
+            if error:
+                return _tool_error(CloudflareParamError(error))
+            coro = self._runtime().crawl_start(**kwargs)
+        elif action == "status":
+            coro = self._runtime().crawl_status(**kwargs)
+        else:
+            coro = self._runtime().crawl_cancel(kwargs.get("job_id"))
+        return await self._call_runtime(
+            coro, context, _crawl_start_guidance if action == "start" else None
+        )
 
 
 def _validate_crawl_body(body: dict[str, Any]) -> str | None:
@@ -1445,6 +2055,7 @@ def _validate_crawl_body(body: dict[str, Any]) -> str | None:
     checks = [
         ("formats", CRAWL_FORMATS),
         ("crawl_purposes", CRAWL_PURPOSES),
+        ("content_use", CRAWL_CONTENT_USES),
     ]
     for key, allowed in checks:
         values = [str(value) for value in _list_from_value(body.get(key))]
@@ -1455,89 +2066,32 @@ def _validate_crawl_body(body: dict[str, Any]) -> str | None:
 
     if _is_present(body.get("source")) and str(body["source"]) not in LINK_SOURCES:
         return f"错误：source 必须是以下值之一：{', '.join(LINK_SOURCES)}"
-    if _is_present(body.get("modified_since")):
-        value = _to_int(body.get("modified_since"), 0)
-        now = int(time.time())
-        one_year_ago = now - 365 * 24 * 60 * 60
-        if value <= 0 or value < one_year_ago or value > now:
-            return "错误：modified_since 必须是最近一年内、且不晚于当前时间的 Unix 秒级时间戳。"
+    for field_name, minimum, maximum in (
+        ("depth", 1, 100000),
+        ("max_age", 0, 604800),
+        ("modified_since", 1, None),
+    ):
+        if not _is_present(body.get(field_name)):
+            continue
+        try:
+            value = _validated_int(body[field_name], field_name, 0, minimum, maximum)
+        except CloudflareParamError as exc:
+            return str(exc)
+        body[field_name] = value
+        if field_name == "modified_since":
+            now = int(time.time())
+            one_year_ago = now - 365 * 24 * 60 * 60
+            if value < one_year_ago or value > now:
+                return "错误：modified_since 必须是最近一年内、且不晚于当前时间的 Unix 秒级时间戳。"
+    formats = [str(value) for value in _list_from_value(body.get("formats"))]
+    if "json" in formats and not _is_present(body.get("json_options")):
+        return "错误：formats 包含 json 时必须提供 json_options。"
     return None
 
 
-@dataclass(config={"arbitrary_types_allowed": True})
-class CloudflareCrawlStatusTool(_CloudflareTool):
-    name: str = "cf_browser_crawl_status"
-    description: str = (
-        "Get status and paginated records for a Cloudflare Browser Run crawl job."
-    )
-    parameters: dict = Field(
-        default_factory=lambda: {
-            "type": "object",
-            "properties": {
-                "job_id": {"type": "string", "description": "Crawl job ID."},
-                "status": {
-                    "type": "string",
-                    "enum": CRAWL_STATUSES,
-                    "description": "Filter records by status: queued, completed, disallowed, skipped, errored, cancelled.",
-                },
-                "cursor": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Pagination cursor from previous response.",
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Max records to return.",
-                },
-                "cache_ttl": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 86400,
-                    "description": "Cache TTL in seconds. 0 disables cache.",
-                },
-            },
-            "required": ["job_id"],
-        }
-    )
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
-        return await self._call_runtime(self._runtime().crawl_status(**kwargs), context)
-
-
-@dataclass(config={"arbitrary_types_allowed": True})
-class CloudflareCrawlCancelTool(_CloudflareTool):
-    name: str = "cf_browser_crawl_cancel"
-    description: str = "Cancel a Cloudflare Browser Run crawl job."
-    parameters: dict = Field(
-        default_factory=lambda: {
-            "type": "object",
-            "properties": {
-                "job_id": {"type": "string", "description": "Crawl job ID to cancel."}
-            },
-            "required": ["job_id"],
-        }
-    )
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
-        return await self._call_runtime(
-            self._runtime().crawl_cancel(kwargs.get("job_id")), context
-        )
-
-
 TOOL_CLASSES = (
-    CloudflareMarkdownTool,
-    CloudflareContentTool,
-    CloudflareLinksTool,
-    CloudflareScrapeTool,
-    CloudflareJsonTool,
-    CloudflareCrawlStartTool,
-    CloudflareCrawlStatusTool,
-    CloudflareCrawlCancelTool,
+    CloudflareFetchTool,
+    CloudflareCrawlTool,
 )
 
 

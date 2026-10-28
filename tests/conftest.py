@@ -40,8 +40,9 @@ def make_config(**overrides):
 
 
 class _RecordedResponse:
-    def __init__(self, status: int, payload) -> None:
+    def __init__(self, status: int, payload, headers=None) -> None:
         self.status = status
+        self.headers = headers or {}
         self._text = payload if isinstance(payload, str) else json.dumps(payload)
 
     async def text(self) -> str:
@@ -59,10 +60,12 @@ class HttpRecorder:
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
-        self.responses: list[tuple[int, object]] = []
+        self.responses: list[tuple[int, object, dict]] = []
 
-    def enqueue(self, status: int = 200, payload=None) -> None:
-        self.responses.append((status, payload if payload is not None else {}))
+    def enqueue(self, status: int = 200, payload=None, headers=None) -> None:
+        self.responses.append(
+            (status, payload if payload is not None else {}, headers or {})
+        )
 
     def _session(self, **kwargs):
         recorder = self
@@ -80,8 +83,8 @@ class HttpRecorder:
                 )
                 if not recorder.responses:
                     raise AssertionError(f"意外的 HTTP 请求：{method} {url}")
-                status, payload = recorder.responses.pop(0)
-                return _RecordedResponse(status, payload)
+                status, payload, response_headers = recorder.responses.pop(0)
+                return _RecordedResponse(status, payload, response_headers)
 
             async def __aenter__(self):
                 return self

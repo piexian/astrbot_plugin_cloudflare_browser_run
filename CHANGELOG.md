@@ -1,5 +1,12 @@
 # 更新日志
 
+## v1.2.0
+
+- LLM 工具合并为 `cf_browser_fetch` 与 `cf_browser_crawl`，新增可访问性树、Snapshot 和 `contentUse`。
+- 修复 Local 结果权限与长 JSON 难分段问题，增加可读内容文件、保留时间和数量上限。
+- 补齐本地参数契约、Crawl 轮询引导、超时预算、结构化错误、浏览器用量与安全重试。
+- Snapshot 强制至少两种格式；LLM 截图统一落盘并返回本地或沙盒路径，不再向模型返回 Base64。
+
 ## v1.1.3
 
 - 新增 SDK v1 公开服务门面：其他插件可通过 `main.get_service(api_version=1)` 取得 `CloudflareBrowserService`，

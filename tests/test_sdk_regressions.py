@@ -1,5 +1,7 @@
 """Verify readiness gates and Tool/SDK request compatibility."""
 
+import json
+
 import pytest
 
 from astrbot_plugin_cloudflare_browser_run.plugin_service import PluginServiceError
@@ -14,6 +16,8 @@ BUSINESS_CALLS = [
     ("links", {"url": "https://example.com"}),
     ("scrape", {"url": "https://example.com", "elements": [{"selector": "h1"}]}),
     ("json", {"url": "https://example.com", "prompt": "Title"}),
+    ("accessibility_tree", {"url": "https://example.com"}),
+    ("snapshot", {"url": "https://example.com"}),
     ("crawl_start", {"url": "https://example.com"}),
     ("crawl_status", {"job_id": "job-1"}),
     ("crawl_cancel", {"job_id": "job-1"}),
@@ -51,6 +55,8 @@ async def test_unready_business_does_not_acquire_runtime(
         ("links", {}),
         ("scrape", {"elements": [{"selector": "h1"}]}),
         ("json", {"prompt": "Title"}),
+        ("accessibility_tree", {}),
+        ("snapshot", {}),
     ],
 )
 @pytest.mark.parametrize(
@@ -63,28 +69,33 @@ async def test_tool_and_sdk_omit_absent_page_source(
     await plugin.initialize()
     service = plugin.get_service()
     tool = next(
-        tool
-        for tool in plugin.context.added_tools
-        if tool.name == f"cf_browser_{method}"
+        tool for tool in plugin.context.added_tools if tool.name == "cf_browser_fetch"
     )
     fake_http.enqueue(payload={"result": "page result"})
     fake_http.enqueue(payload={"result": "page result"})
-    await tool.call(None, **page, **extras)
+    await tool.call(None, mode=method, **page, **extras)
     await getattr(service, method)(**page, **extras)
     assert len(fake_http.calls) == 2
+    expected = {**page, **extras}
+    if method == "accessibility_tree":
+        expected["interestingOnly"] = True
+    elif method == "snapshot":
+        expected["formats"] = ["markdown", "accessibilityTree"]
+        expected["interestingOnly"] = True
     for request in fake_http.calls:
-        assert request["json"] == {**page, **extras}
+        assert request["json"] == expected
 
 
 @pytest.mark.parametrize(
-    "tool_cls", [cf.CloudflareCrawlStatusTool, cf.CloudflareCrawlCancelTool]
+    "action,kwargs",
+    [("status", {}), ("status", {"cache_ttl": 5}), ("cancel", {})],
 )
-@pytest.mark.parametrize("kwargs", [{}, {"cache_ttl": 5}])
 async def test_crawl_tool_missing_id_stays_a_local_error(
-    make_runtime, fake_http, tool_cls, kwargs
+    make_runtime, fake_http, action, kwargs
 ):
-    tool = tool_cls(runtime=make_runtime())
-    assert await tool.call(None, **kwargs) == "错误：必须提供 job_id。"
+    tool = cf.CloudflareCrawlTool(runtime=make_runtime())
+    result = json.loads(await tool.call(None, action=action, **kwargs))
+    assert result["error"]["message"] == "错误：必须提供 job_id。"
     assert fake_http.calls == []
 
 

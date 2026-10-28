@@ -13,7 +13,7 @@
       "api_token": {
         "type": "string",
         "description": "Cloudflare API Token",
-        "hint": "需要 Account 权限：Browser Rendering - Edit，必填",
+        "hint": "需要 Account 权限：Browser Run - Edit（旧界面 Browser Rendering - Edit），必填",
         "default": ""
       }
     }
@@ -37,7 +37,7 @@
       "default_cache_ttl": {
         "type": "int",
         "description": "默认 cacheTTL（秒）",
-        "hint": "Cloudflare Browser Rendering 的 cacheTTL 查询参数，0 表示禁用缓存",
+        "hint": "Cloudflare Browser Run 的 cacheTTL 查询参数，0 表示禁用缓存",
         "default": 5,
         "slider": {
           "min": 0,
@@ -54,7 +54,7 @@
       "max_crawl_limit": {
         "type": "int",
         "description": "最大 Crawl 页数",
-        "hint": "限制 LLM 单次 cf_browser_crawl_start 可提交的 limit",
+        "hint": "限制 cf_browser_crawl(action=start) 可提交的 limit",
         "default": 100,
         "slider": {
           "min": 1,
@@ -72,13 +72,27 @@
       "max_output_chars": {
         "type": "int",
         "description": "最大直接返回字符数",
-        "hint": "超过该长度时，完整结果会保存到插件持久化目录，并在工具返回中提示文件路径、文件大小以及使用 AstrBot 文件搜索/读取工具查看；沙盒运行时下会自动将结果文件同步到当前会话沙盒。",
+        "hint": "超过该长度时保存可读内容文件与原始 JSON；Local 优先写入当前会话 workspace，沙盒运行时下自动同步可读内容文件。",
         "default": 12000,
         "slider": {
           "min": 1000,
           "max": 50000,
           "step": 1000
         }
+      },
+      "result_retention_hours": {
+        "type": "int",
+        "description": "结果文件保留小时数",
+        "hint": "每次写入前清理过期的插件结果文件组",
+        "default": 24,
+        "slider": {"min": 1, "max": 168, "step": 1}
+      },
+      "max_stored_results": {
+        "type": "int",
+        "description": "最大结果文件组数",
+        "hint": "每组包含可读内容文件及可选原始 JSON；写入前清理最旧组",
+        "default": 50,
+        "slider": {"min": 1, "max": 200, "step": 1}
       }
     }
   },
@@ -115,6 +129,16 @@
   "max_output_chars": {
     "type": "int",
     "default": 12000,
+    "invisible": true
+  },
+  "result_retention_hours": {
+    "type": "int",
+    "default": 24,
+    "invisible": true
+  },
+  "max_stored_results": {
+    "type": "int",
+    "default": 50,
     "invisible": true
   }
 }
