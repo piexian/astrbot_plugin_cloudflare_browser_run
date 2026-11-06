@@ -125,10 +125,10 @@ class CloudflareBrowserRunPlugin(Star):
         runtime = self._ensure_runtime()
         authorize_url, state = runtime.oauth.begin_login()
         yield event.plain_result(
-            "请打开链接完成 Cloudflare 授权：\n"
-            f"{authorize_url}\n"
-            "授权完成后，把回调页上的授权码复制发给我；发送「取消」退出。（10 分钟内有效）"
+            "请完成 Cloudflare 授权：打开下一条消息的链接，登录并同意授权，"
+            "然后把回调页上的授权码复制发给我；发送「取消」退出。（10 分钟内有效）"
         )
+        yield event.plain_result(authorize_url)
         initiator_id = event.get_sender_id()
         choice: dict[str, str] = {}
 
@@ -175,11 +175,19 @@ class CloudflareBrowserRunPlugin(Star):
             else ""
         )
         name = f"（{token.account_name}）" if token.account_name else ""
+        renew_note = (
+            f"访问令牌约 {mins} 分钟后到期，临期自动续期，无需人工干预。"
+            if token.refresh_token
+            else (
+                f"本次授权未获得续期令牌（refresh token）：约 {mins} 分钟后到期，"
+                "届时请重新发送 /cfrun login。"
+            )
+        )
         yield event.plain_result(
             f"Cloudflare 授权成功{name}。\n"
             f"{multi}"
             "Account ID 已自动回填到插件数据目录，抓取功能现已可用。\n"
-            f"访问令牌约 {mins} 分钟后到期，临期自动续期，无需人工干预。"
+            f"{renew_note}"
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)

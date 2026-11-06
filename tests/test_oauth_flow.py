@@ -108,7 +108,7 @@ def test_authorize_url_contains_required_params():
     assert "code_challenge=challenge-1" in url
     assert "browser-rendering.write" in url
     assert "account-settings.read" in url
-    assert "offline_access" not in url
+    assert "offline_access" in url
 
 
 async def test_exchange_code_sends_pkce_params():
@@ -124,6 +124,16 @@ async def test_exchange_code_sends_pkce_params():
     assert values["code_verifier"] == "verifier-1"
     assert values["client_id"] == OAUTH_CLIENT_ID
     assert values["redirect_uri"] == OAUTH_REDIRECT_URI
+
+
+async def test_exchange_tolerates_missing_refresh_token():
+    """未授予 offline_access 的客户端无 refresh_token：登录仍成功，降级为一次性令牌。"""
+    body = grant_body(with_refresh=False)
+    client = make_client([("oauth2/token", 200, body)])
+    token = await client.exchange_code("code-1", "verifier-1")
+    await client.close()
+    assert token.access_token == "at-new"
+    assert token.refresh_token == ""
 
 
 async def test_refresh_inherits_refresh_token_when_absent(tmp_path):
@@ -257,4 +267,6 @@ async def test_logout_without_token_is_noop(tmp_path):
 
 def test_login_timeout_constant_is_ten_minutes():
     assert LOGIN_TIMEOUT_SECONDS == 600
-    assert OAUTH_SCOPES == "browser-rendering.write account-settings.read"
+    assert (
+        OAUTH_SCOPES == "browser-rendering.write account-settings.read offline_access"
+    )

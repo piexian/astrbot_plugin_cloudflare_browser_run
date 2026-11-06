@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
 import json
 import os
 import secrets
@@ -20,13 +21,15 @@ from urllib.parse import urlencode
 
 import aiohttp
 
+logger = logging.getLogger("astrbot")
+
 OAUTH_CLIENT_ID = "9f211403f438578c72d299494764ff22"
 OAUTH_REDIRECT_URI = "https://browser-run.alxy.app/callback"
 OAUTH_AUTHORIZATION_URL = "https://dash.cloudflare.com/oauth2/auth"
 OAUTH_TOKEN_URL = "https://dash.cloudflare.com/oauth2/token"
 OAUTH_REVOKE_URL = "https://dash.cloudflare.com/oauth2/revoke"
 ACCOUNTS_URL = "https://api.cloudflare.com/client/v4/accounts"
-OAUTH_SCOPES = "browser-rendering.write account-settings.read"
+OAUTH_SCOPES = "browser-rendering.write account-settings.read offline_access"
 OAUTH_STORE_FILENAME = "oauth.json"
 
 #: 临期阈值：剩余寿命低于该值即刷新（保活循环与请求路径共用）。
@@ -67,7 +70,7 @@ def generate_pkce() -> tuple[str, str]:
 
 
 def build_authorize_url(state: str, code_challenge: str) -> str:
-    """构建授权页链接；不发送 offline_access（未注册协议 scope 会被拒绝）。"""
+    """构建授权页链接；offline_access 是协议 scope（不在 403 清单），换发 refresh_token 必需。"""
     query = urlencode(
         {
             "response_type": "code",
@@ -143,10 +146,24 @@ def _parse_token_grant(
     )
     token_type = str(body.get("token_type") or "").strip().lower()
     expires_in = body.get("expires_in")
-    if not access_token or not refresh_token or token_type != "bearer":
-        raise OAuthError("invalid_token_response", "OAuth 响应缺少必要字段")
+    missing = []
+    if not access_token:
+        missing.append("access_token")
+    if token_type != "bearer":
+        missing.append(f"token_type={token_type or '空'}")
     if not isinstance(expires_in, (int, float)) or expires_in <= 0:
-        raise OAuthError("invalid_token_response", "OAuth 响应缺少有效期")
+        missing.append("expires_in")
+    if missing:
+        raise OAuthError(
+            "invalid_token_response",
+            f"OAuth 响应缺少必要字段：{'、'.join(missing)}（响应字段：{'、'.join(sorted(body))}）",
+        )
+    if not refresh_token:
+        # 未授予 offline_access 时无 refresh_token：令牌到期后需重新授权
+        logger.warning(
+            "Cloudflare OAuth 未返回 refresh_token，令牌到期后需重新 /cfrun login"
+        )
+        refresh_token = previous_refresh_token
     scopes_value = body.get("scope")
     scopes = (
         scopes_value.split()
