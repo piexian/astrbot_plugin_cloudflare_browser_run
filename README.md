@@ -30,15 +30,20 @@
 2. 在插件界面右下角点击加号，选择从链接安装，输入 `https://github.com/piexian/astrbot_plugin_cloudflare_browser_run`
 
 ## 配置
-
 ### 连接设置
+
+两种方式任选：**OAuth 授权（推荐）** 或手动填写 API Token。
+
+发送 `/cfrun login`，按提示打开链接完成 Cloudflare 授权：插件自动获取令牌、回填 Account ID，令牌临期自动续期，无需手动维护。
+`/cfrun status` 查看授权状态；`/cfrun usage` 查看今日本插件消耗的 Browser Run 时长；`/cfrun logout` 撤销远端授权并清除本地令牌。
+授权可随时在 [Manage OAuth authorizations](https://dash.cloudflare.com/?to=/profile/access-management/authorization) 页面撤销。
 
 | 配置项 | 必填 | 说明 |
 |--------|------|------|
-| `account_id` | 是 | Cloudflare Account ID |
-| `api_token` | 是 | Cloudflare API Token，需要 `Browser Run - Edit`（旧界面 `Browser Rendering - Edit`）权限 |
+| `account_id` | OAuth 后可留空 | Cloudflare Account ID；`/cfrun login` 自动回填 |
+| `api_token` | OAuth 后可留空 | Cloudflare API Token，需要 `Browser Run - Edit`（旧界面 `Browser Rendering - Edit`）权限；填写时优先于 OAuth 登录态，WebUI 中默认遮罩显示 |
 
-API Token 创建方式：
+手动填写 API Token 的创建方式（仅在不使用 OAuth 时需要）：
 
 1. 打开 [Cloudflare API Tokens 页面](https://dash.cloudflare.com/?to=/:account/api-tokens)。
 2. 选择创建自定义 Token。可参考 [Cloudflare 创建 API Token 文档](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)。

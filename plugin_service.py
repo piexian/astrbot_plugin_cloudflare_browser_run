@@ -44,10 +44,12 @@ class CloudflareBrowserService:
         self,
         config: dict[str, Any],
         runtime_getter: Callable[[], CloudflareBrowserRuntime],
+        oauth_file_exists: Callable[[], bool] | None = None,
     ) -> None:
         self.instance_id = uuid4().hex
         self._config = config
         self._runtime_getter = runtime_getter
+        self._oauth_file_exists = oauth_file_exists or (lambda: False)
         self._state = "initializing"
 
     # ---- 生命周期（由插件 Main 驱动） ----
@@ -76,7 +78,11 @@ class CloudflareBrowserService:
         state, reason = self._state, None
         if state in {"closing", "closed"}:
             reason = "service_closed"
-        elif state == "ready" and missing_credentials(self._config):
+        elif (
+            state == "ready"
+            and missing_credentials(self._config)
+            and not self._oauth_file_exists()
+        ):
             state, reason = "unavailable", "not_configured"
         return {
             "api_version": self.api_version,
