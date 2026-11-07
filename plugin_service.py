@@ -44,10 +44,12 @@ class CloudflareBrowserService:
         self,
         config: dict[str, Any],
         runtime_getter: Callable[[], CloudflareBrowserRuntime],
+        oauth_credentials_ready: Callable[[], bool] | None = None,
     ) -> None:
         self.instance_id = uuid4().hex
         self._config = config
         self._runtime_getter = runtime_getter
+        self._oauth_credentials_ready = oauth_credentials_ready or (lambda: False)
         self._state = "initializing"
 
     # ---- 生命周期（由插件 Main 驱动） ----
@@ -72,11 +74,15 @@ class CloudflareBrowserService:
         return self
 
     def get_status(self) -> dict[str, Any]:
-        """同步本地快照：只读取内存状态与配置，不创建 Runtime、不读写文件、不联网。"""
+        """同步本地快照：只读取内存状态、配置和本地 OAuth 登录态，不创建 Runtime、不写文件、不联网。"""
         state, reason = self._state, None
         if state in {"closing", "closed"}:
             reason = "service_closed"
-        elif state == "ready" and missing_credentials(self._config):
+        elif (
+            state == "ready"
+            and missing_credentials(self._config)
+            and not self._oauth_credentials_ready()
+        ):
             state, reason = "unavailable", "not_configured"
         return {
             "api_version": self.api_version,

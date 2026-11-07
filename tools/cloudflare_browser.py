@@ -18,6 +18,15 @@ import aiohttp
 from pydantic import Field
 from pydantic.dataclasses import dataclass
 
+from .oauth import (
+    OAUTH_STORE_FILENAME,
+    OAuthClient,
+    OAuthError,
+    OAuthManager,
+    TokenStore,
+    oauth_user_message,
+)
+
 try:
     from astrbot.api.star import StarTools
 except Exception:  # pragma: no cover - compatibility with older AstrBot builds
@@ -1150,6 +1159,13 @@ class CloudflareBrowserRuntime:
         self.config = config
         self.data_dir = Path(data_dir).expanduser().resolve(strict=False)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.oauth = OAuthManager(
+            TokenStore(self.data_dir / OAUTH_STORE_FILENAME),
+            OAuthClient(),
+        )
+        self._usage_date = ""
+        self._usage_seconds = 0.0
+        self._load_usage()
 
     def cfg(self, key: str) -> Any:
         return _cfg(self.config, key)
@@ -1184,10 +1200,66 @@ class CloudflareBrowserRuntime:
         )
 
     def validate_credentials(self) -> str | None:
+        token = self.oauth.load_token()
+        if token is not None:
+            if not token.account_id and not str(self.cfg("account_id")).strip():
+                return (
+                    "错误：OAuth 登录未绑定 Account ID。请重新 /cfrun login，"
+                    "或在配置中填写 account_id。"
+                )
+            return None
         missing = missing_credentials(self.config)
         if missing:
-            return f"错误：未配置 Cloudflare {missing}。"
+            return (
+                "错误：尚未配置 Cloudflare 凭据。请发送 /cfrun login 完成授权，"
+                "或在配置中填写 account_id 与 api_token。"
+            )
         return None
+
+    def _record_usage(self, headers: Any) -> None:
+        """按 UTC 日累计 X-Browser-Ms-Used；持久化到 usage.json 以跨重启续算。"""
+        raw = headers.get("X-Browser-Ms-Used") if hasattr(headers, "get") else None
+        try:
+            ms = float(raw)
+        except (TypeError, ValueError):
+            return
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        if today != self._usage_date:
+            self._usage_date, self._usage_seconds = today, 0.0
+        self._usage_seconds += ms / 1000.0
+        self._save_usage()
+
+    def _load_usage(self) -> None:
+        try:
+            data = json.loads(
+                (self.data_dir / "usage.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("date"), str)
+            and isinstance(data.get("seconds"), (int, float))
+        ):
+            self._usage_date, self._usage_seconds = data["date"], float(data["seconds"])
+
+    def _save_usage(self) -> None:
+        try:
+            (self.data_dir / "usage.json").write_text(
+                json.dumps(
+                    {"date": self._usage_date, "seconds": round(self._usage_seconds, 3)}
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def usage_today(self) -> tuple[str, float]:
+        """返回 (UTC 日期, 今日累计秒数)；跨日自动归零。"""
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        if today != self._usage_date:
+            return today, 0.0
+        return self._usage_date, self._usage_seconds
 
     async def request(
         self,
@@ -1203,16 +1275,26 @@ class CloudflareBrowserRuntime:
         if credential_error:
             raise CloudflareAPIError(credential_error)
 
+        oauth_token = self.oauth.load_token()
         account_id = str(self.cfg("account_id")).strip()
-        api_token = str(self.cfg("api_token")).strip()
+        if not account_id and oauth_token is not None:
+            account_id = oauth_token.account_id.strip()
+        try:
+            bearer = await self.oauth.get_access_token()
+        except OAuthError as exc:
+            api_token = str(self.cfg("api_token")).strip()
+            if api_token and account_id:
+                bearer = api_token  # OAuth 未登录或已失效时回退到手动配置的 token
+            else:
+                raise CloudflareAPIError(oauth_user_message(exc)) from exc
         url = (
             f"{API_BASE}/accounts/{account_id}/browser-rendering/{endpoint.lstrip('/')}"
         )
         headers = {
-            "Authorization": f"Bearer {api_token}",
+            "Authorization": f"Bearer {bearer}",
             "Content-Type": "application/json",
         }
-        secrets = [api_token]
+        secrets = [bearer]
         if body:
             secrets.extend(_collect_sensitive_values(body))
         timeout_seconds = _to_int(
@@ -1239,6 +1321,7 @@ class CloudflareBrowserRuntime:
                             data = json.loads(text) if text else {}
                         except json.JSONDecodeError:
                             data = {"raw": text}
+                        self._record_usage(getattr(response, "headers", {}))
 
                         if response.status >= 400:
                             retry_delay = _retry_delay(

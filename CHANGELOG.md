@@ -1,5 +1,12 @@
 # 更新日志
 
+## v1.3.0
+
+- 新增 Cloudflare OAuth 登录：`/cfrun login` 发起授权，会话内粘贴授权码即完成；`/cfrun status`、`/cfrun usage`、`/cfrun logout` 管理登录态。
+- 授权后自动发现并回填 Account ID；令牌临期自动续期；令牌与账号信息以 0600 权限存于插件数据目录 `oauth.json`。
+- OAuth 登录态优先，`api_token` 保留兜底；WebUI 配置项标记 `secret` 默认遮罩显示。
+- `/cfrun usage` 按 UTC 日累计本插件消耗的 `X-Browser-Ms-Used`（官方无聚合额度 API，账号总量请在 Dashboard 查看）。
+
 ## v1.2.0
 
 - LLM 工具合并为 `cf_browser_fetch` 与 `cf_browser_crawl`，新增可访问性树、Snapshot 和 `contentUse`。

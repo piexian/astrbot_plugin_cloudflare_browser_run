@@ -30,15 +30,20 @@
 2. 在插件界面右下角点击加号，选择从链接安装，输入 `https://github.com/piexian/astrbot_plugin_cloudflare_browser_run`
 
 ## 配置
-
 ### 连接设置
+
+两种方式任选：**OAuth 授权（推荐）** 或手动填写 API Token；OAuth 已登录时优先使用，API Token 作兜底。
+
+发送 `/cfrun login`，按提示打开链接完成 Cloudflare 授权：插件自动获取令牌、回填 Account ID，令牌临期自动续期，无需手动维护。
+`/cfrun status` 查看授权状态；`/cfrun usage` 查看今日本插件消耗的 Browser Run 时长；`/cfrun logout` 撤销远端授权并清除本地令牌。
+授权可随时在 [Manage OAuth authorizations](https://dash.cloudflare.com/?to=/profile/access-management/authorization) 页面撤销。
 
 | 配置项 | 必填 | 说明 |
 |--------|------|------|
-| `account_id` | 是 | Cloudflare Account ID |
-| `api_token` | 是 | Cloudflare API Token，需要 `Browser Run - Edit`（旧界面 `Browser Rendering - Edit`）权限 |
+| `account_id` | OAuth 后可留空 | Cloudflare Account ID；`/cfrun login` 自动回填 |
+| `api_token` | OAuth 后可留空 | Cloudflare API Token，需要 `Browser Run - Edit`（旧界面 `Browser Rendering - Edit`）权限；OAuth 已登录时仅作兜底，WebUI 中默认遮罩显示 |
 
-API Token 创建方式：
+手动填写 API Token 的创建方式（仅在不使用 OAuth 时需要）：
 
 1. 打开 [Cloudflare API Tokens 页面](https://dash.cloudflare.com/?to=/:account/api-tokens)。
 2. 选择创建自定义 Token。可参考 [Cloudflare 创建 API Token 文档](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)。
@@ -109,7 +114,7 @@ service = get_browser_service(context)
 status = service.get_status()
 # 同步本地快照：{api_version, instance_id, state, ready, reason}
 # state 为 initializing / ready / unavailable / closing / closed；
-# 缺 account_id / api_token 时为 unavailable（reason=not_configured）
+# 配置缺 account_id / api_token 且无可用 OAuth 登录态时为 unavailable（reason=not_configured）
 status = await service.wait_ready(timeout=10)
 # 超时抛 TimeoutError；服务关闭后抛 RuntimeError（code=service_closed）
 
@@ -131,7 +136,7 @@ await service.crawl_cancel(job["job_id"])
 - 页面方法返回含 `type`、`url`、`result` 的字典；`crawl_start` 返回 `job_id`，查询和取消结果保留远端业务字段。
 - SDK 返回完整结果：不截断、不落结果文件、不上传沙箱；限长与文件桥接仅是 LLM Tool 的展示行为。
 - `service.capabilities()` 返回 `web.fetch`、各单页能力及 `browser.crawl`；新增能力标识为 `browser.accessibility_tree` 和 `browser.snapshot`。
-- 版本只接受整数 `1`（不接受布尔值），不兼容时错误码为 `unsupported_version`；初始化未完成或缺凭据时，业务调用错误码为 `not_ready`，不会请求远端。
+- 版本只接受整数 `1`（不接受布尔值），不兼容时错误码为 `unsupported_version`；初始化未完成或无可用凭据时，业务调用错误码为 `not_ready`，不会请求远端。
 - 不在插件 `initialize()` 中等待依赖就绪；以上等待和业务调用用于事件处理或后台业务协程。
 - 参数错误抛 `CloudflareParamError`（ValueError 子类，消息与工具一致）；Cloudflare API 错误抛 `CloudflareAPIError`（token / headers / cookies 等已脱敏）。
 - 插件卸载后旧服务引用永久失效：业务调用抛 `RuntimeError`（code=service_closed），`get_status()` 仍可查询；重载后新服务的 `instance_id` 不同。
