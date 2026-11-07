@@ -122,7 +122,7 @@ class OAuthToken:
         access = data.get("access_token")
         refresh = data.get("refresh_token")
         expires_at = data.get("expires_at")
-        if not access or not refresh or not isinstance(expires_at, (int, float)):
+        if not access or not isinstance(expires_at, (int, float)):
             return None
         scopes = data.get("scopes")
         return cls(

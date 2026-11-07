@@ -1215,10 +1215,6 @@ class CloudflareBrowserRuntime:
                 "或在配置中填写 account_id 与 api_token。"
             )
         return None
-        missing = missing_credentials(self.config)
-        if missing:
-            return f"错误：未配置 Cloudflare {missing}。"
-        return None
 
     def _record_usage(self, headers: Any) -> None:
         """按 UTC 日累计 X-Browser-Ms-Used；持久化到 usage.json 以跨重启续算。"""
@@ -1279,7 +1275,10 @@ class CloudflareBrowserRuntime:
         if credential_error:
             raise CloudflareAPIError(credential_error)
 
+        oauth_token = self.oauth.load_token()
         account_id = str(self.cfg("account_id")).strip()
+        if not account_id and oauth_token is not None:
+            account_id = oauth_token.account_id.strip()
         try:
             bearer = await self.oauth.get_access_token()
         except OAuthError as exc:
