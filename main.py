@@ -21,6 +21,7 @@ from .tools.cloudflare_browser import (
 from .tools.oauth import (
     LOGIN_TIMEOUT_SECONDS,
     OAUTH_STORE_FILENAME,
+    TokenStore,
     OAuthError,
     oauth_user_message,
 )
@@ -42,7 +43,7 @@ class CloudflareBrowserRunPlugin(Star):
         self._service = CloudflareBrowserService(
             self.config,
             self._ensure_runtime,
-            oauth_file_exists=self._oauth_file_exists,
+            oauth_credentials_ready=self._oauth_credentials_ready,
         )
         self._login_sessions: set[str] = set()
         self._register_tools()
@@ -57,9 +58,18 @@ class CloudflareBrowserRunPlugin(Star):
             self._runtime = CloudflareBrowserRuntime(self.config, get_plugin_data_dir())
         return self._runtime
 
-    def _oauth_file_exists(self) -> bool:
-        """服务状态探测用：仅判断 OAuth 登录态文件是否存在，不创建 Runtime。"""
-        return (get_plugin_data_dir() / OAUTH_STORE_FILENAME).exists()
+    def _oauth_credentials_ready(self) -> bool:
+        """判断 OAuth 登录态是否具备可用的 Account ID。"""
+        token = TokenStore(
+            get_plugin_data_dir() / OAUTH_STORE_FILENAME
+        ).load()
+        if token is None:
+            return False
+        settings = self.config.get("connection_settings")
+        if not isinstance(settings, dict):
+            return bool(token.account_id.strip())
+        configured_account_id = str(settings.get("account_id") or "").strip()
+        return bool(token.account_id.strip() or configured_account_id)
 
     def _register_tools(self) -> None:
         """根据配置注册启用的 LLM Tool。"""

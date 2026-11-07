@@ -190,12 +190,32 @@ async def test_login_flow_invalid_code_reports_relogin(make_plugin, monkeypatch)
     assert "/cfrun login" in joined and "重新授权" in joined
 
 
-def test_oauth_file_probe_reflects_store(make_plugin):
-    plugin = make_plugin()
-    assert plugin._oauth_file_exists() is False
+def test_oauth_credentials_probe_requires_account_id(make_plugin):
+    plugin = make_plugin(
+        make_config(connection_settings={"account_id": "", "api_token": ""})
+    )
+    assert plugin._oauth_credentials_ready() is False
     runtime = plugin._ensure_runtime()
+    runtime.oauth._store.save(make_oauth_token(account_id=""))
+    assert plugin._oauth_credentials_ready() is False
     runtime.oauth._store.save(make_oauth_token())
-    assert plugin._oauth_file_exists() is True
+    assert plugin._oauth_credentials_ready() is True
+
+
+async def test_service_not_ready_for_oauth_without_account_id(make_plugin):
+    plugin = make_plugin(
+        make_config(connection_settings={"account_id": "", "api_token": ""})
+    )
+    runtime = plugin._ensure_runtime()
+    runtime.oauth._store.save(make_oauth_token(account_id=""))
+    await plugin.initialize()
+
+    status = plugin.get_service().get_status()
+    assert status["state"] == "unavailable"
+    assert status["ready"] is False
+    assert status["reason"] == "not_configured"
+
+    await plugin.terminate()
 
 
 def test_store_filename_shared_between_probe_and_manager(make_plugin):

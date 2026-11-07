@@ -122,6 +122,14 @@ class OAuthToken:
         if not access or not isinstance(expires_at, (int, float)):
             return None
         scopes = data.get("scopes")
+        account_count_value = data.get("account_count", 1)
+        if account_count_value is None:
+            account_count_value = 1
+        try:
+            account_count = int(account_count_value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
         return cls(
             access_token=str(access),
             refresh_token=str(refresh),
@@ -129,7 +137,7 @@ class OAuthToken:
             scopes=[str(s) for s in scopes] if isinstance(scopes, list) else [],
             account_id=str(data.get("account_id") or ""),
             account_name=str(data.get("account_name") or ""),
-            account_count=int(data.get("account_count") or 1),
+            account_count=account_count,
         )
 
 
@@ -246,7 +254,7 @@ class OAuthClient:
             ) as response:
                 text = await response.text()
                 status = response.status
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise OAuthError("network_error", f"OAuth 网络请求失败: {exc}") from exc
         try:
             body = json.loads(text) if text else {}
@@ -317,7 +325,7 @@ class OAuthClient:
             ) as response:
                 text = await response.text()
                 status = response.status
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise OAuthError("network_error", f"获取账号列表失败: {exc}") from exc
         try:
             body = json.loads(text) if text else {}

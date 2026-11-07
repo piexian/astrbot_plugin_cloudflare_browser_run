@@ -71,6 +71,13 @@ class FakeSession:
         return _FakeResponse(status, payload)
 
 
+class _TimeoutSession:
+    def post(self, *args, **kwargs):
+        raise asyncio.TimeoutError("post timeout")
+
+    def get(self, *args, **kwargs):
+        raise asyncio.TimeoutError("get timeout")
+
 def make_client(responses: list[tuple[str, int, dict]]) -> OAuthClient:
     return OAuthClient(session=FakeSession(responses))
 
@@ -126,6 +133,18 @@ async def test_exchange_code_sends_pkce_params():
     assert values["redirect_uri"] == OAUTH_REDIRECT_URI
 
 
+async def test_timeout_errors_map_to_network_error():
+    client = OAuthClient(session=_TimeoutSession())
+
+    with pytest.raises(OAuthError) as exc_info:
+        await client.exchange_code("code-1", "verifier-1")
+    assert exc_info.value.code == "network_error"
+
+    with pytest.raises(OAuthError) as exc_info:
+        await client.fetch_accounts("access-token")
+    assert exc_info.value.code == "network_error"
+
+
 async def test_exchange_tolerates_missing_refresh_token():
     """未授予 offline_access 的客户端无 refresh_token：登录仍成功，降级为一次性令牌。"""
     body = grant_body(with_refresh=False)
@@ -157,6 +176,14 @@ async def test_token_store_roundtrip_and_permissions(tmp_path):
     store.clear()
     assert store.load() is None
 
+
+def test_token_store_rejects_malformed_account_count(tmp_path):
+    path = tmp_path / "oauth.json"
+    payload = make_token().to_dict()
+    payload["account_count"] = "not-a-number"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert TokenStore(path).load() is None
 
 async def test_complete_login_fills_account_and_starts_keepalive(tmp_path):
     store = TokenStore(tmp_path / "oauth.json")
