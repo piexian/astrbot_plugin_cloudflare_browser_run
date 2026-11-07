@@ -4,7 +4,7 @@
 
 - 新增 Cloudflare OAuth 登录：`/cfrun login` 发起授权（Authorization Code + PKCE），会话内粘贴授权码即完成；`/cfrun status`、`/cfrun usage`、`/cfrun logout` 管理登录态。
 - 授权后自动发现并回填 Account ID；令牌临期自动续期（后台保活循环，不依赖请求失败触发）；令牌与账号信息以 0600 权限存于插件数据目录 `oauth.json`。
-- `api_token` 保留兜底并优先于 OAuth；WebUI 配置项标记 `secret` 默认遮罩显示。
+- OAuth 登录态优先，`api_token` 保留兜底；WebUI 配置项标记 `secret` 默认遮罩显示。
 - `/cfrun usage` 按 UTC 日累计本插件消耗的 `X-Browser-Ms-Used`（官方无聚合额度 API，账号总量请在 Dashboard 查看）。
 - 新增无状态授权码中转 Worker（`worker/`，browser-run.alxy.app）：展示授权码、承载 OAuth client 的 client_uri/policy/tos 页面。
 

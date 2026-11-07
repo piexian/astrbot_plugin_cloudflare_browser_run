@@ -13,7 +13,7 @@
       "api_token": {
         "type": "string",
         "description": "Cloudflare API Token",
-        "hint": "需要 Browser Run - Edit 权限；留空则使用 /cfrun login 的 OAuth 登录态",
+        "hint": "需要 Browser Run - Edit 权限；OAuth 已登录时仅作兜底",
         "secret": true,
         "default": ""
       }

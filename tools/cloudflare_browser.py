@@ -1200,19 +1200,21 @@ class CloudflareBrowserRuntime:
         )
 
     def validate_credentials(self) -> str | None:
-        if not str(self.cfg("api_token")).strip():
-            token = self.oauth.load_token()
-            if token is None:
-                return (
-                    "错误：尚未配置 Cloudflare 凭据。请发送 /cfrun login 完成授权，"
-                    "或在配置中填写 account_id 与 api_token。"
-                )
-            if not token.account_id:
+        token = self.oauth.load_token()
+        if token is not None:
+            if not token.account_id and not str(self.cfg("account_id")).strip():
                 return (
                     "错误：OAuth 登录未绑定 Account ID。请重新 /cfrun login，"
                     "或在配置中填写 account_id。"
                 )
             return None
+        missing = missing_credentials(self.config)
+        if missing:
+            return (
+                "错误：尚未配置 Cloudflare 凭据。请发送 /cfrun login 完成授权，"
+                "或在配置中填写 account_id 与 api_token。"
+            )
+        return None
         missing = missing_credentials(self.config)
         if missing:
             return f"错误：未配置 Cloudflare {missing}。"
@@ -1277,19 +1279,15 @@ class CloudflareBrowserRuntime:
         if credential_error:
             raise CloudflareAPIError(credential_error)
 
-        api_token = str(self.cfg("api_token")).strip()
-        if api_token:
-            bearer = api_token
-            account_id = str(self.cfg("account_id")).strip()
-        else:
-            try:
-                bearer = await self.oauth.get_access_token()
-            except OAuthError as exc:
+        account_id = str(self.cfg("account_id")).strip()
+        try:
+            bearer = await self.oauth.get_access_token()
+        except OAuthError as exc:
+            api_token = str(self.cfg("api_token")).strip()
+            if api_token and account_id:
+                bearer = api_token  # OAuth 未登录或已失效时回退到手动配置的 token
+            else:
                 raise CloudflareAPIError(oauth_user_message(exc)) from exc
-            account_id = (
-                str(self.cfg("account_id")).strip()
-                or self.oauth.load_token().account_id
-            )
         url = (
             f"{API_BASE}/accounts/{account_id}/browser-rendering/{endpoint.lstrip('/')}"
         )

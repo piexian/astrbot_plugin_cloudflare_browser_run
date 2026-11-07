@@ -97,6 +97,20 @@ def test_usage_ignores_missing_header(make_runtime):
     assert runtime.usage_today()[1] == 0.0
 
 
+async def test_request_prefers_oauth_over_api_token(make_runtime, fake_http):
+    """OAuth 已登录时即使配置了 api_token 也优先使用 OAuth 令牌。"""
+    from conftest import API_BASE
+
+    runtime = make_runtime()
+    runtime.oauth._store.save(make_oauth_token())
+    fake_http.enqueue(200, {"success": True, "result": {"markdown": "# hi"}})
+    await runtime.page_markdown(url="https://example.com")
+    call = fake_http.calls[0]
+    assert call["headers"]["Authorization"] == "Bearer at-1"
+    # 配置的 account_id 优先于登录态自动发现的账号
+    assert call["url"] == f"{API_BASE}/accounts/acct-test/browser-rendering/markdown"
+
+
 # ---------- 会话化登录流程（替换 session_waiter） ----------
 
 

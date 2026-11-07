@@ -195,23 +195,29 @@ class CloudflareBrowserRunPlugin(Star):
     async def cfrun_status(self, event: AstrMessageEvent):
         """查看 Cloudflare 授权状态。"""
         runtime = self._ensure_runtime()
+        token = runtime.oauth.load_token()
+        if token is not None:
+            mins = max(0, int((token.expires_at - time.time()) / 60))
+            account = token.account_name or "未知账号"
+            extra = (
+                "\n已配置的 api_token 转为兜底，仅在登录态失效时使用。"
+                if str(runtime.cfg("api_token")).strip()
+                else ""
+            )
+            yield event.plain_result(
+                f"当前鉴权：OAuth 登录（{account}）\n"
+                f"Account ID：{token.account_id or '未获取'}\n"
+                f"访问令牌剩余约 {mins} 分钟，临期自动续期。{extra}"
+            )
+            return
         if str(runtime.cfg("api_token")).strip():
             yield event.plain_result(
-                "当前鉴权：配置的 api_token（优先于 OAuth 登录态）。"
+                "当前鉴权：配置的 api_token（OAuth 未登录时的兜底）。\n"
+                "如需免维护令牌，请发送 /cfrun login 改用 OAuth 登录。"
             )
             return
-        token = runtime.oauth.load_token()
-        if token is None:
-            yield event.plain_result(
-                "当前未登录：请发送 /cfrun login 完成授权，或在配置中填写 account_id 与 api_token。"
-            )
-            return
-        mins = max(0, int((token.expires_at - time.time()) / 60))
-        account = token.account_name or "未知账号"
         yield event.plain_result(
-            f"当前鉴权：OAuth 登录（{account}）\n"
-            f"Account ID：{token.account_id or '未获取'}\n"
-            f"访问令牌剩余约 {mins} 分钟，临期自动续期。"
+            "当前未登录：请发送 /cfrun login 完成授权，或在配置中填写 account_id 与 api_token。"
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)

@@ -32,7 +32,7 @@
 ## 配置
 ### 连接设置
 
-两种方式任选：**OAuth 授权（推荐）** 或手动填写 API Token。
+两种方式任选：**OAuth 授权（推荐）** 或手动填写 API Token；OAuth 已登录时优先使用，API Token 作兜底。
 
 发送 `/cfrun login`，按提示打开链接完成 Cloudflare 授权：插件自动获取令牌、回填 Account ID，令牌临期自动续期，无需手动维护。
 `/cfrun status` 查看授权状态；`/cfrun usage` 查看今日本插件消耗的 Browser Run 时长；`/cfrun logout` 撤销远端授权并清除本地令牌。
@@ -41,7 +41,7 @@
 | 配置项 | 必填 | 说明 |
 |--------|------|------|
 | `account_id` | OAuth 后可留空 | Cloudflare Account ID；`/cfrun login` 自动回填 |
-| `api_token` | OAuth 后可留空 | Cloudflare API Token，需要 `Browser Run - Edit`（旧界面 `Browser Rendering - Edit`）权限；填写时优先于 OAuth 登录态，WebUI 中默认遮罩显示 |
+| `api_token` | OAuth 后可留空 | Cloudflare API Token，需要 `Browser Run - Edit`（旧界面 `Browser Rendering - Edit`）权限；OAuth 已登录时仅作兜底，WebUI 中默认遮罩显示 |
 
 手动填写 API Token 的创建方式（仅在不使用 OAuth 时需要）：
 
