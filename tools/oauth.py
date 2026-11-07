@@ -1,7 +1,4 @@
-"""Cloudflare 自管 OAuth 客户端（Authorization Code + PKCE S256）。
-
-无状态公开客户端：token 与自动发现的 account_id 以 0600 JSON 落在插件
-持久化目录；后台循环在临期前自动刷新，不依赖请求失败触发。
+"""Cloudflare 自管 OAuth 客户端
 """
 
 from __future__ import annotations
@@ -32,7 +29,7 @@ ACCOUNTS_URL = "https://api.cloudflare.com/client/v4/accounts"
 OAUTH_SCOPES = "browser-rendering.write account-settings.read offline_access"
 OAUTH_STORE_FILENAME = "oauth.json"
 
-#: 临期阈值：剩余寿命低于该值即刷新（保活循环与请求路径共用）。
+#: 临期阈值：剩余寿命低于该值即刷新。
 REFRESH_MARGIN_SECONDS = 600
 #: 保活循环检查间隔。
 KEEPALIVE_INTERVAL_SECONDS = 60
@@ -49,7 +46,7 @@ class OAuthError(Exception):
 
 
 def oauth_user_message(exc: OAuthError) -> str:
-    """把 OAuthError 转成面向用户的中文提示。"""
+    """把 OAuthError 转成面向用户友好提示。"""
     if exc.code == "not_logged_in":
         return "尚未登录 Cloudflare：请发送 /cfrun login 完成授权，或在配置中填写 api_token。"
     if exc.code in {"invalid_grant", "unauthorized_client"}:
@@ -70,7 +67,7 @@ def generate_pkce() -> tuple[str, str]:
 
 
 def build_authorize_url(state: str, code_challenge: str) -> str:
-    """构建授权页链接；offline_access 是协议 scope（不在 403 清单），换发 refresh_token 必需。"""
+    """构建授权页链接；offline_access 是协议 scope，换发 refresh_token 必需。"""
     query = urlencode(
         {
             "response_type": "code",
@@ -139,7 +136,7 @@ class OAuthToken:
 def _parse_token_grant(
     body: dict[str, Any], previous_refresh_token: str = ""
 ) -> OAuthToken:
-    """解析 token 端点响应；refresh_token 缺省时继承旧值（轮换语义）。"""
+    """解析 token 端点响应；refresh_token 缺省时继承旧值。"""
     access_token = str(body.get("access_token") or "").strip()
     refresh_token = (
         str(body.get("refresh_token") or "").strip() or previous_refresh_token
@@ -179,7 +176,7 @@ def _parse_token_grant(
 
 
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
-    """原子写入仅属主可读写（0600）的 JSON 文件。"""
+    """原子写入仅属主可读写的 JSON 文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -193,7 +190,7 @@ def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 class TokenStore:
-    """OAuth 令牌与账号信息持久化（oauth.json，0600）。"""
+    """OAuth 令牌与账号信息持久化。"""
 
     def __init__(self, path: Path | str) -> None:
         self._path = Path(path)
@@ -222,7 +219,7 @@ class TokenStore:
 
 
 class OAuthClient:
-    """Cloudflare OAuth token/revoke/accounts 端点客户端（无 client secret）。"""
+    """Cloudflare OAuth token/revoke/accounts 端点客户端。"""
 
     def __init__(self, timeout: float = 30.0, session: Any = None) -> None:
         self._timeout = aiohttp.ClientTimeout(total=timeout)
@@ -307,7 +304,7 @@ class OAuthClient:
             pass
 
     async def fetch_accounts(self, access_token: str) -> list[OAuthAccount]:
-        """列出用户可见账号（用于自动回填 account_id）。"""
+        """列出用户可见账号。"""
         session = await self._get_session()
         try:
             async with session.get(
@@ -416,7 +413,7 @@ class OAuthManager:
             return current
 
     def ensure_keepalive(self) -> None:
-        """有登录态时启动保活循环（已在跑则忽略）。"""
+        """有登录态时启动保活循环。"""
         if self._keepalive_task is not None and not self._keepalive_task.done():
             return
         if self._store.load() is None:
@@ -426,7 +423,7 @@ class OAuthManager:
         )
 
     async def _keepalive_loop(self) -> None:
-        """周期检查临期并提前刷新；失效（invalid_grant）即停止等待重登。"""
+        """周期检查临期并提前刷新；失效即停止等待重登。"""
         try:
             while True:
                 await asyncio.sleep(KEEPALIVE_INTERVAL_SECONDS)
@@ -445,7 +442,7 @@ class OAuthManager:
             pass
 
     async def logout(self) -> OAuthToken | None:
-        """撤销远端授权并清除本地令牌，返回被清除的令牌（未登录返回 None）。"""
+        """撤销远端授权并清除本地令牌，返回被清除的令牌。"""
         self._stop_keepalive()
         token = self._store.load()
         if token is not None:
