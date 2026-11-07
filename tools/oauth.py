@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import logging
 import json
 import os
 import secrets
@@ -21,7 +20,8 @@ from urllib.parse import urlencode
 
 import aiohttp
 
-logger = logging.getLogger("astrbot")
+from astrbot.api import logger
+
 
 OAUTH_CLIENT_ID = "9f211403f438578c72d299494764ff22"
 OAUTH_REDIRECT_URI = "https://browser-run.alxy.app/callback"
